@@ -1,0 +1,157 @@
+name: Build VeloTube APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: "APK build variant"
+        required: true
+        default: "debug"
+        type: choice
+        options:
+          - debug
+          - release
+      run_tests:
+        description: "Run unit & Robolectric tests before building APK"
+        required: true
+        default: true
+        type: boolean
+      create_release:
+        description: "Publish APK as a GitHub Release"
+        required: true
+        default: false
+        type: boolean
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Gradle 9.3.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.3.1"
+
+      - name: Prepare debug keystore
+        run: |
+          if [ -s debug.keystore.base64 ]; then
+            tr -d '\r\n ' < debug.keystore.base64 | base64 -d > debug.keystore
+            echo "Decoded debug.keystore from debug.keystore.base64"
+          else
+            keytool -genkeypair -v \
+              -keystore debug.keystore \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+            echo "Generated fresh debug.keystore"
+          fi
+
+      - name: Prepare release keystore (if building release)
+        if: ${{ (inputs.build_type || 'debug') == 'release' }}
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          ENV_STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          ENV_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            printf '%s' "$KEYSTORE_BASE64" | tr -d '\r\n ' | base64 -d > my-upload-key.jks
+            echo "KEYSTORE_PATH=${GITHUB_WORKSPACE}/my-upload-key.jks" >> "$GITHUB_ENV"
+            echo "STORE_PASSWORD=${ENV_STORE_PASSWORD}" >> "$GITHUB_ENV"
+            echo "KEY_PASSWORD=${ENV_KEY_PASSWORD}" >> "$GITHUB_ENV"
+            echo "Using repository release keystore secrets."
+          else
+            FALLBACK_PASS="velotube-ci-upload-pass"
+            keytool -genkeypair -v \
+              -keystore my-upload-key.jks \
+              -storepass "$FALLBACK_PASS" \
+              -alias upload \
+              -keypass "$FALLBACK_PASS" \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=VeloTube,O=VeloTube,C=US"
+            echo "KEYSTORE_PATH=${GITHUB_WORKSPACE}/my-upload-key.jks" >> "$GITHUB_ENV"
+            echo "STORE_PASSWORD=${FALLBACK_PASS}" >> "$GITHUB_ENV"
+            echo "KEY_PASSWORD=${FALLBACK_PASS}" >> "$GITHUB_ENV"
+            echo "::warning::KEYSTORE_BASE64 secret not set. Generated an ephemeral release keystore for this run."
+          fi
+
+      - name: Configure .env for Secrets Gradle Plugin
+        env:
+          SECRET_YT_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+        run: |
+          if [ -n "$SECRET_YT_KEY" ]; then
+            printf 'YOUTUBE_API_KEY=%s\n' "$SECRET_YT_KEY" > .env
+            echo "Injected YOUTUBE_API_KEY from GitHub Repository Secrets."
+          else
+            touch .env
+            echo "No YOUTUBE_API_KEY secret found; building with .env.example defaults (you can sync via Library -> Settings -> Remote Config)."
+          fi
+
+      - name: Run unit & Robolectric tests
+        if: ${{ inputs.run_tests != false }}
+        run: gradle :app:testDebugUnitTest --no-daemon
+
+      - name: Build Debug APK
+        if: ${{ (inputs.build_type || 'debug') == 'debug' }}
+        run: gradle :app:assembleDebug --no-daemon
+
+      - name: Build Release APK
+        if: ${{ (inputs.build_type || 'debug') == 'release' }}
+        run: gradle :app:assembleRelease --no-daemon
+
+      - name: Collect built APK
+        id: collect_apk
+        run: |
+          VARIANT="${{ inputs.build_type || 'debug' }}"
+          mkdir -p dist
+          APK_PATH=$(find app/build/outputs/apk/"$VARIANT" -name "*.apk" | head -n 1)
+          if [ -z "$APK_PATH" ]; then
+            echo "Error: APK not found under app/build/outputs/apk/$VARIANT"
+            exit 1
+          fi
+          OUT_NAME="VeloTube-${VARIANT}-$(date +%Y%m%d-%H%M).apk"
+          cp "$APK_PATH" "dist/${OUT_NAME}"
+          echo "apk_file=dist/${OUT_NAME}" >> "$GITHUB_OUTPUT"
+          ls -lh dist/
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VeloTube-${{ inputs.build_type || 'debug' }}-APK
+          path: ${{ steps.collect_apk.outputs.apk_file }}
+          retention-days: 30
+
+      - name: Create GitHub Release (optional)
+        if: ${{ inputs.create_release == true }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: VeloTube v1.0.${{ github.run_number }} (${{ inputs.build_type || 'debug' }})
+          files: |
+            ${{ steps.collect_apk.outputs.apk_file }}
+          generate_release_notes: true
