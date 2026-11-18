@@ -4,7 +4,9 @@ import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import com.example.data.repository.DownloaderResponseParser
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -18,7 +20,7 @@ class ExampleRobolectricTest {
     fun `read string from context`() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val appName = context.getString(R.string.app_name)
-        assertEquals("VeloTube", appName)
+        assertEquals("YmnTube", appName)
     }
 
     @Test
@@ -93,5 +95,29 @@ class ExampleRobolectricTest {
         assertEquals(360, parsed?.selected?.height)
         assertEquals("Download ready", parsed?.message)
         assertNull(parsed?.error)
+    }
+
+    @Test
+    fun `parseAppUpdateInfo parses enabled version code and url`() {
+        val enabledJson = """
+            {
+              "update_enabled": true,
+              "version": "1.1.0",
+              "version_code": 2,
+              "update_url": "https://example.com/ymntube-v1.1.0.apk",
+              "title": "New YmnTube Update",
+              "changelog": "Background playback & faster downloads"
+            }
+        """.trimIndent()
+        val enabled = DownloaderResponseParser.parseAppUpdateInfo(enabledJson)
+        assertTrue(enabled?.updateEnabled == true)
+        assertEquals("1.1.0", enabled?.version)
+        assertEquals(2, enabled?.versionCode)
+        assertEquals("https://example.com/ymntube-v1.1.0.apk", enabled?.updateUrl)
+        assertEquals("New YmnTube Update", enabled?.title)
+
+        val disabledJson = """{"update_enabled": false, "version": "1.1.0", "update_url": "https://example.com/app"}"""
+        val disabled = DownloaderResponseParser.parseAppUpdateInfo(disabledJson)
+        assertFalse(disabled?.updateEnabled ?: true)
     }
 }

@@ -20,9 +20,11 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.Downloading
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -39,9 +41,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
+import com.example.data.model.ActiveDownload
+import com.example.data.model.DownloadJobStatus
 import com.example.data.model.VideoItem
 import com.example.data.remote.FormatUtils
 import com.example.ui.theme.CrimsonAccent
+import com.example.ui.theme.CyanElectric
+import com.example.ui.theme.CyanSoft
 import com.example.ui.theme.EmeraldGallery
 import com.example.ui.theme.EmeraldSoft
 import com.example.ui.theme.OutlineSubtle
@@ -54,10 +60,19 @@ import com.example.ui.theme.TextSecondary
 fun VideoCard(
     video: VideoItem,
     isDownloaded: Boolean,
+    activeDownload: ActiveDownload? = null,
     onClick: () -> Unit,
     onDownloadClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val isDownloadingNow = activeDownload != null && (
+        activeDownload.status == DownloadJobStatus.DOWNLOADING ||
+            activeDownload.status == DownloadJobStatus.RESOLVING ||
+            activeDownload.status == DownloadJobStatus.EXPORTING_GALLERY ||
+            activeDownload.status == DownloadJobStatus.QUEUED
+        )
+    val pct = ((activeDownload?.progress ?: 0f) * 100f).toInt().coerceIn(0, 100)
+
     Surface(
         modifier = modifier
             .fillMaxWidth()
@@ -96,7 +111,35 @@ fun VideoCard(
                         )
                 )
 
-                if (isDownloaded) {
+                if (isDownloadingNow) {
+                    Row(
+                        modifier = Modifier
+                            .align(Alignment.TopStart)
+                            .padding(10.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Color(0xE609090D))
+                            .border(1.dp, CyanElectric.copy(alpha = 0.6f), RoundedCornerShape(8.dp))
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Downloading,
+                            contentDescription = "Downloading",
+                            tint = CyanElectric,
+                            modifier = Modifier.size(13.dp)
+                        )
+                        Text(
+                            text = if (activeDownload?.status == DownloadJobStatus.EXPORTING_GALLERY) {
+                                "Saving ${activeDownload.qualityLabel}…"
+                            } else {
+                                "Downloading $pct%"
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = CyanElectric
+                        )
+                    }
+                } else if (isDownloaded) {
                     Row(
                         modifier = Modifier
                             .align(Alignment.TopStart)
@@ -136,6 +179,29 @@ fun VideoCard(
                             style = MaterialTheme.typography.labelSmall,
                             color = TextPrimary,
                             fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+
+                if (isDownloadingNow) {
+                    if ((activeDownload?.totalBytes ?: 0L) > 0L) {
+                        LinearProgressIndicator(
+                            progress = { activeDownload?.progress ?: 0f },
+                            color = CyanElectric,
+                            trackColor = Color.Black.copy(alpha = 0.5f),
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .fillMaxWidth()
+                                .height(3.dp)
+                        )
+                    } else {
+                        LinearProgressIndicator(
+                            color = CyanElectric,
+                            trackColor = Color.Black.copy(alpha = 0.5f),
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .fillMaxWidth()
+                                .height(3.dp)
                         )
                     }
                 }
@@ -208,15 +274,30 @@ fun VideoCard(
                         modifier = Modifier
                             .size(34.dp)
                             .clip(CircleShape)
-                            .background(if (isDownloaded) EmeraldSoft else SurfaceLevel2),
+                            .background(
+                                when {
+                                    isDownloadingNow -> CyanSoft
+                                    isDownloaded -> EmeraldSoft
+                                    else -> SurfaceLevel2
+                                }
+                            ),
                         contentAlignment = Alignment.Center
                     ) {
-                        Icon(
-                            imageVector = if (isDownloaded) Icons.Rounded.CheckCircle else Icons.Rounded.Download,
-                            contentDescription = "Download ${video.title}",
-                            tint = if (isDownloaded) EmeraldGallery else TextPrimary,
-                            modifier = Modifier.size(18.dp)
-                        )
+                        if (isDownloadingNow) {
+                            Text(
+                                text = "$pct%",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = CyanElectric,
+                                fontWeight = FontWeight.Bold
+                            )
+                        } else {
+                            Icon(
+                                imageVector = if (isDownloaded) Icons.Rounded.CheckCircle else Icons.Rounded.Download,
+                                contentDescription = "Download ${video.title}",
+                                tint = if (isDownloaded) EmeraldGallery else TextPrimary,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
                     }
                 }
             }

@@ -21,6 +21,7 @@ import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -32,11 +33,15 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
+import com.example.data.model.ActiveDownload
+import com.example.data.model.DownloadJobStatus
 import com.example.data.model.VideoItem
 import com.example.data.remote.FormatUtils
+import com.example.ui.theme.CyanElectric
 import com.example.ui.theme.EmeraldGallery
 import com.example.ui.theme.OutlineSubtle
 import com.example.ui.theme.SurfaceLevel1
@@ -48,10 +53,19 @@ import com.example.ui.theme.TextSecondary
 fun CompactVideoRow(
     video: VideoItem,
     isDownloaded: Boolean,
+    activeDownload: ActiveDownload? = null,
     onClick: () -> Unit,
     onDownloadClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val isDownloadingNow = activeDownload != null && (
+        activeDownload.status == DownloadJobStatus.DOWNLOADING ||
+            activeDownload.status == DownloadJobStatus.RESOLVING ||
+            activeDownload.status == DownloadJobStatus.EXPORTING_GALLERY ||
+            activeDownload.status == DownloadJobStatus.QUEUED
+        )
+    val pct = ((activeDownload?.progress ?: 0f) * 100f).toInt().coerceIn(0, 100)
+
     Surface(
         modifier = modifier
             .fillMaxWidth()
@@ -97,6 +111,17 @@ fun CompactVideoRow(
                         )
                     }
                 }
+                if (isDownloadingNow) {
+                    LinearProgressIndicator(
+                        progress = { activeDownload?.progress ?: 0f },
+                        color = CyanElectric,
+                        trackColor = Color.Black.copy(alpha = 0.5f),
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .fillMaxWidth()
+                            .height(3.dp)
+                    )
+                }
             }
 
             Spacer(modifier = Modifier.width(12.dp))
@@ -119,16 +144,20 @@ fun CompactVideoRow(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
-                val statsLine = buildList {
-                    if (video.viewCount > 0) add(FormatUtils.formatViews(video.viewCount))
-                    val rel = FormatUtils.formatRelativeTime(video.publishedAt)
-                    if (rel.isNotBlank()) add(rel)
-                }.joinToString(" • ")
+                val statsLine = if (isDownloadingNow) {
+                    "Downloading ${activeDownload?.qualityLabel.orEmpty()} • $pct%"
+                } else {
+                    buildList {
+                        if (video.viewCount > 0) add(FormatUtils.formatViews(video.viewCount))
+                        val rel = FormatUtils.formatRelativeTime(video.publishedAt)
+                        if (rel.isNotBlank()) add(rel)
+                    }.joinToString(" • ")
+                }
                 if (statsLine.isNotBlank()) {
                     Text(
                         text = statsLine,
                         style = MaterialTheme.typography.labelSmall,
-                        color = TextSecondary,
+                        color = if (isDownloadingNow) CyanElectric else TextSecondary,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
@@ -139,12 +168,21 @@ fun CompactVideoRow(
                 onClick = onDownloadClick,
                 modifier = Modifier.minimumInteractiveComponentSize()
             ) {
-                Icon(
-                    imageVector = if (isDownloaded) Icons.Rounded.CheckCircle else Icons.Rounded.Download,
-                    contentDescription = "Download ${video.title}",
-                    tint = if (isDownloaded) EmeraldGallery else TextSecondary,
-                    modifier = Modifier.size(20.dp)
-                )
+                if (isDownloadingNow) {
+                    Text(
+                        text = "$pct%",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = CyanElectric,
+                        fontWeight = FontWeight.Bold
+                    )
+                } else {
+                    Icon(
+                        imageVector = if (isDownloaded) Icons.Rounded.CheckCircle else Icons.Rounded.Download,
+                        contentDescription = "Download ${video.title}",
+                        tint = if (isDownloaded) EmeraldGallery else TextSecondary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
             }
         }
     }

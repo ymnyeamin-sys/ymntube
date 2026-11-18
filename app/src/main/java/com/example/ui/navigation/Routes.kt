@@ -24,5 +24,5 @@ data class WatchRoute(
 
 @Serializable
 data class OfflinePlayerRoute(
-    val videoId: String
+    val downloadId: String
 )

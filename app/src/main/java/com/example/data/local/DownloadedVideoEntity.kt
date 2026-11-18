@@ -5,7 +5,8 @@ import androidx.room.PrimaryKey
 
 @Entity(tableName = "downloaded_videos")
 data class DownloadedVideoEntity(
-    @PrimaryKey val videoId: String,
+    @PrimaryKey val downloadId: String,
+    val videoId: String,
     val title: String,
     val channelTitle: String,
     val thumbnailUrl: String,

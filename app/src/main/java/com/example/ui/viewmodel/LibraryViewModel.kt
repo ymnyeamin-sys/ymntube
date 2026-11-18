@@ -3,7 +3,6 @@ package com.example.ui.viewmodel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
-import com.example.data.local.DEFAULT_DOWNLOAD_API_BASE_URL
 import com.example.data.local.UserPreferences
 import com.example.data.local.UserPreferencesRepository
 import com.example.data.local.WatchHistoryEntity
@@ -14,7 +13,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -39,18 +37,15 @@ class LibraryViewModel(
     private val _configMessage = MutableStateFlow<String?>(null)
     val configMessage: StateFlow<String?> = _configMessage.asStateFlow()
 
-    init {
-        viewModelScope.launch {
-            val savedRemoteUrl = preferencesRepository.preferencesFlow.first().remoteConfigUrl
-            if (savedRemoteUrl.isNotBlank()) {
-                downloadRepository.syncRemoteConfig(savedRemoteUrl)
-            }
-        }
-    }
-
     fun setAutoExportToGallery(enabled: Boolean) {
         viewModelScope.launch {
             preferencesRepository.setAutoExportToGallery(enabled)
+        }
+    }
+
+    fun setBackgroundPlayEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            preferencesRepository.setBackgroundPlayEnabled(enabled)
         }
     }
 
@@ -60,27 +55,13 @@ class LibraryViewModel(
         }
     }
 
-    fun saveDownloadApiUrl(url: String) {
-        viewModelScope.launch {
-            preferencesRepository.setDownloadApiBaseUrl(url)
-            _configMessage.value = "Download API URL updated."
-        }
-    }
-
-    fun resetDownloadApiUrl() {
-        viewModelScope.launch {
-            preferencesRepository.setDownloadApiBaseUrl(DEFAULT_DOWNLOAD_API_BASE_URL)
-            _configMessage.value = "Download API URL reset to default Railway endpoint."
-        }
-    }
-
-    fun syncRemoteConfig(configUrl: String) {
+    fun syncFixedRemoteConfig() {
         viewModelScope.launch {
             _isSyncingConfig.value = true
             _configMessage.value = null
-            when (val res = downloadRepository.syncRemoteConfig(configUrl)) {
+            when (val res = downloadRepository.syncRemoteConfig()) {
                 is ApiResult.Success -> {
-                    _configMessage.value = "Synced remote config (API key & Download URL updated)."
+                    _configMessage.value = "Remote configuration synced."
                 }
                 is ApiResult.Error -> {
                     _configMessage.value = res.message

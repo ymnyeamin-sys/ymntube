@@ -33,3 +33,12 @@ data class RemoteAppConfig(
     @Json(name = "download_api_url") val downloadApiUrl: String? = null,
     @Json(name = "updated_at") val updatedAt: String? = null
 )
+
+data class AppUpdateInfo(
+    val updateEnabled: Boolean,
+    val version: String,
+    val versionCode: Int,
+    val updateUrl: String,
+    val title: String,
+    val changelog: String
+)

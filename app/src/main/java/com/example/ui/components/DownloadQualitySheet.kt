@@ -19,6 +19,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AudioFile
+import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.HighQuality
 import androidx.compose.material.icons.rounded.PermMedia
@@ -58,6 +59,7 @@ import com.example.ui.viewmodel.DownloadSheetState
 @Composable
 fun DownloadQualitySheet(
     state: DownloadSheetState,
+    downloadedQualities: Set<String> = emptySet(),
     onDismiss: () -> Unit,
     onSelectFormat: (VideoItem, DownloadFormat) -> Unit
 ) {
@@ -182,25 +184,35 @@ fun DownloadQualitySheet(
                             modifier = Modifier.size(16.dp)
                         )
                         Text(
-                            text = "Saves inside VeloTube Vault + syncs to Android Gallery",
+                            text = "Saves inside YmnTube Vault + syncs to Android Gallery",
                             style = MaterialTheme.typography.labelMedium,
                             color = EmeraldGallery
                         )
                     }
 
-                    Text(
-                        text = "Available Qualities (${state.formats.size})",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = TextPrimary
-                    )
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(
+                            text = "Available Qualities (${state.formats.size})",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = TextPrimary
+                        )
+                        Text(
+                            text = "Tap any resolution to download (you can download multiple resolutions).",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = TextSecondary
+                        )
+                    }
 
                     LazyColumn(
                         modifier = Modifier.fillMaxWidth(),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         items(state.formats, key = { it.formatId }) { fmt ->
+                            val alreadySaved = fmt.qualityLabel.lowercase() in downloadedQualities ||
+                                fmt.formatId.lowercase() in downloadedQualities
                             FormatOptionRow(
                                 format = fmt,
+                                alreadySaved = alreadySaved,
                                 onClick = { onSelectFormat(state.video, fmt) }
                             )
                         }
@@ -216,13 +228,18 @@ fun DownloadQualitySheet(
 @Composable
 private fun FormatOptionRow(
     format: DownloadFormat,
+    alreadySaved: Boolean,
     onClick: () -> Unit
 ) {
     Surface(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(14.dp))
-            .border(1.dp, OutlineSubtle, RoundedCornerShape(14.dp))
+            .border(
+                width = 1.dp,
+                color = if (alreadySaved) EmeraldGallery.copy(alpha = 0.55f) else OutlineSubtle,
+                shape = RoundedCornerShape(14.dp)
+            )
             .clickable(onClick = onClick)
             .testTag("format_option_${format.formatId}"),
         color = SurfaceLevel2,
@@ -251,11 +268,26 @@ private fun FormatOptionRow(
             }
 
             Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = format.qualityLabel,
-                    style = MaterialTheme.typography.titleSmall,
-                    color = TextPrimary
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = format.qualityLabel,
+                        style = MaterialTheme.typography.titleSmall,
+                        color = TextPrimary
+                    )
+                    if (alreadySaved) {
+                        Surface(color = EmeraldSoft, shape = RoundedCornerShape(6.dp)) {
+                            Text(
+                                text = "Saved",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = EmeraldGallery,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
+                }
                 Text(
                     text = if (format.hasVideo) "${format.ext.uppercase()} • Video + Audio" else "${format.ext.uppercase()} • Audio",
                     style = MaterialTheme.typography.bodySmall,
@@ -264,9 +296,9 @@ private fun FormatOptionRow(
             }
 
             Icon(
-                imageVector = Icons.Rounded.Download,
+                imageVector = if (alreadySaved) Icons.Rounded.CheckCircle else Icons.Rounded.Download,
                 contentDescription = "Download ${format.qualityLabel}",
-                tint = CrimsonAccent,
+                tint = if (alreadySaved) EmeraldGallery else CrimsonAccent,
                 modifier = Modifier.size(22.dp)
             )
         }

@@ -4,7 +4,7 @@ enum class YouTubeCategory(
     val label: String,
     val categoryId: String?
 ) {
-    ALL("Trending", null),
+    ALL("For You", null),
     MUSIC("Music", "10"),
     GAMING("Gaming", "20"),
     TECH("Tech", "28"),

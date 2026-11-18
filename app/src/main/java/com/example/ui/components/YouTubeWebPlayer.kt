@@ -73,6 +73,7 @@ private class YouTubePlayerBridge(
 fun YouTubeWebPlayer(
     videoId: String,
     modifier: Modifier = Modifier,
+    backgroundPlayEnabled: Boolean = true,
     onSwitchToNativePlayer: (() -> Unit)? = null,
     onEmbedError: ((Int) -> Unit)? = null
 ) {
@@ -101,7 +102,7 @@ fun YouTubeWebPlayer(
                     color = TextPrimary
                 )
                 Text(
-                    text = "Switch to Native ExoPlayer for smooth playback.",
+                    text = "Switch to Native ExoPlayer for smooth & lock-screen playback.",
                     style = MaterialTheme.typography.bodySmall,
                     color = TextSecondary
                 )
@@ -159,7 +160,7 @@ fun YouTubeWebPlayer(
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_BOUND, true)
+                setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
             }
             val webViewInstance = this
             CookieManager.getInstance().apply {
@@ -187,7 +188,7 @@ fun YouTubeWebPlayer(
                         currentSwitchToNative?.invoke()
                     }
                 },
-                "VeloTubeBridge"
+                "YmnTubeBridge"
             )
             webChromeClient = WebChromeClient()
             webViewClient = object : WebViewClient() {
@@ -232,7 +233,7 @@ fun YouTubeWebPlayer(
             if (!isDestroyed) {
                 isDestroyed = true
                 runCatching {
-                    webView.removeJavascriptInterface("VeloTubeBridge")
+                    webView.removeJavascriptInterface("YmnTubeBridge")
                     webView.stopLoading()
                     webView.loadUrl("about:blank")
                     (webView.parent as? ViewGroup)?.removeView(webView)
@@ -248,9 +249,20 @@ fun YouTubeWebPlayer(
             factory = { webView },
             update = { view ->
                 if (isDestroyed) return@AndroidView
-                if (view.tag != videoId) {
-                    view.tag = videoId
+                val loadKey = "$videoId|$backgroundPlayEnabled"
+                if (view.tag != loadKey) {
+                    view.tag = loadKey
                     val safeId = videoId.replace(Regex("[^A-Za-z0-9_-]"), "")
+                    val visibilityShim = if (backgroundPlayEnabled) {
+                        """
+                        try {
+                          Object.defineProperty(document, 'hidden', { get: function() { return false; }, configurable: true });
+                          Object.defineProperty(document, 'visibilityState', { get: function() { return 'visible'; }, configurable: true });
+                          window.addEventListener('visibilitychange', function(e) { e.stopImmediatePropagation(); }, true);
+                          document.addEventListener('visibilitychange', function(e) { e.stopImmediatePropagation(); }, true);
+                        } catch (_) {}
+                        """.trimIndent()
+                    } else ""
                     val html = """
                         <!DOCTYPE html>
                         <html>
@@ -264,12 +276,13 @@ fun YouTubeWebPlayer(
                         <body>
                           <div id="ytplayer"></div>
                           <script>
+                            $visibilityShim
                             var errorReported = false;
                             function reportError(code) {
                               if (errorReported) return;
                               errorReported = true;
-                              if (window.VeloTubeBridge && window.VeloTubeBridge.onPlayerError) {
-                                window.VeloTubeBridge.onPlayerError(code);
+                              if (window.YmnTubeBridge && window.YmnTubeBridge.onPlayerError) {
+                                window.YmnTubeBridge.onPlayerError(code);
                               }
                             }
                             function onYouTubeIframeAPIReady() {

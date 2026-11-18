@@ -23,28 +23,25 @@ import androidx.compose.material.icons.rounded.Bookmark
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.CloudSync
 import androidx.compose.material.icons.rounded.DeleteSweep
+import androidx.compose.material.icons.rounded.Headphones
 import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Key
-import androidx.compose.material.icons.rounded.Link
 import androidx.compose.material.icons.rounded.PermMedia
+import androidx.compose.material.icons.rounded.SystemUpdate
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -53,7 +50,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.BuildConfig
 import com.example.data.local.WatchHistoryEntity
+import com.example.data.model.ActiveDownload
 import com.example.data.model.VideoItem
 import com.example.data.remote.ApiClient
 import com.example.ui.components.CompactVideoRow
@@ -68,7 +67,6 @@ import com.example.ui.theme.ObsidianBg
 import com.example.ui.theme.OutlineSubtle
 import com.example.ui.theme.SurfaceLevel1
 import com.example.ui.theme.SurfaceLevel2
-import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
 import com.example.ui.viewmodel.LibraryViewModel
@@ -77,8 +75,10 @@ import com.example.ui.viewmodel.LibraryViewModel
 fun LibraryScreen(
     viewModel: LibraryViewModel,
     downloadedIds: Set<String>,
+    activeDownloads: Map<String, ActiveDownload>,
     onVideoClick: (VideoItem) -> Unit,
     onDownloadClick: (VideoItem) -> Unit,
+    onCheckForUpdate: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val watchlist by viewModel.watchlist.collectAsStateWithLifecycle()
@@ -87,18 +87,6 @@ fun LibraryScreen(
     val isSyncing by viewModel.isSyncingConfig.collectAsStateWithLifecycle()
     val configMessage by viewModel.configMessage.collectAsStateWithLifecycle()
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
-
-    var downloadUrlInput by rememberSaveable { mutableStateOf(prefs.downloadApiBaseUrl) }
-    var remoteConfigInput by rememberSaveable { mutableStateOf(prefs.remoteConfigUrl) }
-
-    LaunchedEffect(prefs.downloadApiBaseUrl) {
-        downloadUrlInput = prefs.downloadApiBaseUrl
-    }
-    LaunchedEffect(prefs.remoteConfigUrl) {
-        if (prefs.remoteConfigUrl.isNotBlank() && remoteConfigInput.isBlank()) {
-            remoteConfigInput = prefs.remoteConfigUrl
-        }
-    }
 
     val tabs = listOf("Saved (${watchlist.size})", "History (${history.size})", "Settings")
 
@@ -167,6 +155,7 @@ fun LibraryScreen(
                             CompactVideoRow(
                                 video = video,
                                 isDownloaded = video.id in downloadedIds,
+                                activeDownload = activeDownloads.values.firstOrNull { it.videoId == video.id },
                                 onClick = { onVideoClick(video) },
                                 onDownloadClick = { onDownloadClick(video) }
                             )
@@ -180,7 +169,7 @@ fun LibraryScreen(
                     LibraryEmptyState(
                         icon = Icons.Rounded.History,
                         title = "Watch History is Empty",
-                        subtitle = "Videos you open in VeloTube will appear here for quick replay."
+                        subtitle = "Videos you open in YmnTube will appear here for quick replay."
                     )
                 } else {
                     LazyColumn(
@@ -209,6 +198,7 @@ fun LibraryScreen(
                             CompactVideoRow(
                                 video = video,
                                 isDownloaded = video.id in downloadedIds,
+                                activeDownload = activeDownloads.values.firstOrNull { it.videoId == video.id },
                                 onClick = { onVideoClick(video) },
                                 onDownloadClick = { onDownloadClick(video) }
                             )
@@ -241,6 +231,52 @@ fun LibraryScreen(
                         }
                     }
 
+                    // Background / Lock-Screen Playback Switch
+                    item {
+                        Surface(
+                            color = SurfaceLevel1,
+                            shape = RoundedCornerShape(16.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .border(1.dp, OutlineSubtle, RoundedCornerShape(16.dp))
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(16.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Headphones,
+                                    contentDescription = null,
+                                    tint = CyanElectric
+                                )
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "Background & Lock-Screen Play",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        color = TextPrimary
+                                    )
+                                    Text(
+                                        text = "Keep music and videos playing even when the screen is locked.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = TextSecondary
+                                    )
+                                }
+                                Switch(
+                                    checked = prefs.backgroundPlayEnabled,
+                                    onCheckedChange = { viewModel.setBackgroundPlayEnabled(it) },
+                                    colors = SwitchDefaults.colors(
+                                        checkedThumbColor = TextPrimary,
+                                        checkedTrackColor = CyanElectric
+                                    )
+                                )
+                            }
+                        }
+                    }
+
+                    // Sync Downloads to Gallery Switch
                     item {
                         Surface(
                             color = SurfaceLevel1,
@@ -268,7 +304,7 @@ fun LibraryScreen(
                                         color = TextPrimary
                                     )
                                     Text(
-                                        text = "Automatically export MP4 videos to Movies/VeloTube so they appear in your Android Gallery.",
+                                        text = "Automatically export MP4 videos to Movies/YmnTube in your Android Gallery.",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = TextSecondary
                                     )
@@ -285,155 +321,9 @@ fun LibraryScreen(
                         }
                     }
 
-                    // Download API Base URL Editor
+                    // Home Feed Region Selector (BD default)
                     item {
-                        Surface(
-                            color = SurfaceLevel1,
-                            shape = RoundedCornerShape(16.dp),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .border(1.dp, OutlineSubtle, RoundedCornerShape(16.dp))
-                        ) {
-                            Column(
-                                modifier = Modifier.padding(16.dp),
-                                verticalArrangement = Arrangement.spacedBy(10.dp)
-                            ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.Link,
-                                        contentDescription = null,
-                                        tint = CyanElectric,
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                    Text(
-                                        text = "Download API Base URL",
-                                        style = MaterialTheme.typography.titleSmall,
-                                        color = TextPrimary
-                                    )
-                                }
-                                OutlinedTextField(
-                                    value = downloadUrlInput,
-                                    onValueChange = { downloadUrlInput = it },
-                                    singleLine = true,
-                                    placeholder = { Text("https://ytdlp-production-4d018ba3.up.railway.app", color = TextMuted) },
-                                    shape = RoundedCornerShape(12.dp),
-                                    colors = OutlinedTextFieldDefaults.colors(
-                                        focusedContainerColor = SurfaceLevel2,
-                                        unfocusedContainerColor = SurfaceLevel2,
-                                        focusedBorderColor = CrimsonAccent,
-                                        unfocusedBorderColor = OutlineSubtle,
-                                        focusedTextColor = TextPrimary,
-                                        unfocusedTextColor = TextPrimary
-                                    ),
-                                    modifier = Modifier.fillMaxWidth()
-                                )
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    Button(
-                                        onClick = { viewModel.saveDownloadApiUrl(downloadUrlInput) },
-                                        colors = ButtonDefaults.buttonColors(
-                                            containerColor = CrimsonAccent,
-                                            contentColor = TextPrimary
-                                        ),
-                                        shape = RoundedCornerShape(10.dp),
-                                        modifier = Modifier.weight(1f)
-                                    ) {
-                                        Text("Save URL")
-                                    }
-                                    OutlinedButton(
-                                        onClick = { viewModel.resetDownloadApiUrl() },
-                                        shape = RoundedCornerShape(10.dp)
-                                    ) {
-                                        Text("Reset", color = TextSecondary)
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Remote Web-Admin Config Sync
-                    item {
-                        Surface(
-                            color = SurfaceLevel1,
-                            shape = RoundedCornerShape(16.dp),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .border(1.dp, OutlineSubtle, RoundedCornerShape(16.dp))
-                        ) {
-                            Column(
-                                modifier = Modifier.padding(16.dp),
-                                verticalArrangement = Arrangement.spacedBy(10.dp)
-                            ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.CloudSync,
-                                        contentDescription = null,
-                                        tint = EmeraldGallery,
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                    Text(
-                                        text = "Remote Config Sync (Web Admin)",
-                                        style = MaterialTheme.typography.titleSmall,
-                                        color = TextPrimary
-                                    )
-                                }
-                                Text(
-                                    text = "Paste your hosted velotube-config.json URL (from VeloTube Web Admin or GitHub Gist Raw) to remotely update the YouTube API key & Download API URL.",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = TextSecondary
-                                )
-                                OutlinedTextField(
-                                    value = remoteConfigInput,
-                                    onValueChange = { remoteConfigInput = it },
-                                    singleLine = true,
-                                    placeholder = { Text("https://gist.githubusercontent.com/.../velotube-config.json", color = TextMuted) },
-                                    shape = RoundedCornerShape(12.dp),
-                                    colors = OutlinedTextFieldDefaults.colors(
-                                        focusedContainerColor = SurfaceLevel2,
-                                        unfocusedContainerColor = SurfaceLevel2,
-                                        focusedBorderColor = EmeraldGallery,
-                                        unfocusedBorderColor = OutlineSubtle,
-                                        focusedTextColor = TextPrimary,
-                                        unfocusedTextColor = TextPrimary
-                                    ),
-                                    modifier = Modifier.fillMaxWidth()
-                                )
-                                Button(
-                                    onClick = { viewModel.syncRemoteConfig(remoteConfigInput) },
-                                    enabled = remoteConfigInput.isNotBlank() && !isSyncing,
-                                    colors = ButtonDefaults.buttonColors(
-                                        containerColor = EmeraldGallery,
-                                        contentColor = ObsidianBg
-                                    ),
-                                    shape = RoundedCornerShape(10.dp),
-                                    modifier = Modifier.fillMaxWidth()
-                                ) {
-                                    if (isSyncing) {
-                                        CircularProgressIndicator(
-                                            color = ObsidianBg,
-                                            modifier = Modifier.size(18.dp),
-                                            strokeWidth = 2.dp
-                                        )
-                                        Spacer(modifier = Modifier.width(8.dp))
-                                        Text("Syncing…")
-                                    } else {
-                                        Text("Sync Remote Config")
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    item {
-                        val regions = listOf("US", "BD", "IN", "GB", "CA", "JP")
+                        val regions = listOf("BD", "IN", "US", "GB", "CA", "JP")
                         Surface(
                             color = SurfaceLevel1,
                             shape = RoundedCornerShape(16.dp),
@@ -446,7 +336,7 @@ fun LibraryScreen(
                                 verticalArrangement = Arrangement.spacedBy(10.dp)
                             ) {
                                 Text(
-                                    text = "Trending Feed Region",
+                                    text = "Home Feed Region",
                                     style = MaterialTheme.typography.titleSmall,
                                     color = TextPrimary
                                 )
@@ -473,24 +363,102 @@ fun LibraryScreen(
                         }
                     }
 
+                    // Automatic Remote Config & App Updates (Read-only status + action buttons)
+                    item {
+                        Surface(
+                            color = SurfaceLevel1,
+                            shape = RoundedCornerShape(16.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .border(1.dp, OutlineSubtle, RoundedCornerShape(16.dp))
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(16.dp),
+                                verticalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.CloudSync,
+                                        contentDescription = null,
+                                        tint = EmeraldGallery,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Text(
+                                        text = "YmnTube Cloud Sync & Updates",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        color = TextPrimary
+                                    )
+                                }
+                                Text(
+                                    text = "Configuration syncs automatically on startup. Installed version: v${BuildConfig.VERSION_NAME}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = TextSecondary
+                                )
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Button(
+                                        onClick = { viewModel.syncFixedRemoteConfig() },
+                                        enabled = !isSyncing,
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = EmeraldGallery,
+                                            contentColor = ObsidianBg
+                                        ),
+                                        shape = RoundedCornerShape(10.dp),
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        if (isSyncing) {
+                                            CircularProgressIndicator(
+                                                color = ObsidianBg,
+                                                modifier = Modifier.size(16.dp),
+                                                strokeWidth = 2.dp
+                                            )
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text("Syncing…")
+                                        } else {
+                                            Text("Sync Config")
+                                        }
+                                    }
+
+                                    OutlinedButton(
+                                        onClick = onCheckForUpdate,
+                                        shape = RoundedCornerShape(10.dp),
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.SystemUpdate,
+                                            contentDescription = null,
+                                            tint = CyanElectric,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text("Check Update", color = CyanElectric, maxLines = 1)
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     item {
                         val ytConfigured = ApiClient.isYouTubeKeyConfigured(prefs.youtubeApiKeyOverride)
                         ApiStatusCard(
-                            title = "YouTube Data API v3",
-                            badgeText = if (ytConfigured) {
-                                if (prefs.youtubeApiKeyOverride.isNotBlank()) "Remote" else "Ready"
-                            } else "YOUTUBE_API_KEY",
+                            title = "YouTube Service",
+                            badgeText = if (ytConfigured) "Connected" else "Syncing",
                             connected = ytConfigured,
-                            subtitle = "Powers trending feeds, search, channel info, and comments."
+                            subtitle = "Automatically provisioned via remote configuration."
                         )
                     }
 
                     item {
                         ApiStatusCard(
-                            title = "Custom Download API",
+                            title = "Download Service",
                             badgeText = "Active",
                             connected = true,
-                            subtitle = prefs.downloadApiBaseUrl
+                            subtitle = "Automatically provisioned via remote configuration."
                         )
                     }
                 }

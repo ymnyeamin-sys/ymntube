@@ -30,6 +30,7 @@ data class WatchUiState(
     val isLoadingComments: Boolean = false,
     val isSavedToWatchlist: Boolean = false,
     val offlineDownload: DownloadedVideoEntity? = null,
+    val offlineVariants: List<DownloadedVideoEntity> = emptyList(),
     val directStreamUrl: String? = null,
     val playerMode: PlayerMode = PlayerMode.YOUTUBE_EMBED,
     val isResolvingStream: Boolean = false,
@@ -69,15 +70,22 @@ class WatchViewModel(
     private fun observeOfflineStatus() {
         viewModelScope.launch {
             downloadRepository.downloadedVideos.collect { list ->
-                val match = list.firstOrNull { it.videoId == videoId }
+                val variants = list.filter { it.videoId == videoId }
                 val current = _uiState.value
-                val nextMode = if (match != null && current.playerMode == PlayerMode.YOUTUBE_EMBED && current.directStreamUrl == null) {
+                val preferredMatch = current.offlineDownload?.let { prev ->
+                    variants.firstOrNull { it.downloadId == prev.downloadId }
+                } ?: variants.firstOrNull()
+                val nextMode = if (preferredMatch != null &&
+                    current.playerMode == PlayerMode.YOUTUBE_EMBED &&
+                    current.directStreamUrl == null
+                ) {
                     PlayerMode.OFFLINE_VAULT
                 } else {
                     current.playerMode
                 }
                 _uiState.value = current.copy(
-                    offlineDownload = match,
+                    offlineDownload = preferredMatch,
+                    offlineVariants = variants,
                     playerMode = nextMode
                 )
             }
@@ -88,11 +96,13 @@ class WatchViewModel(
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isLoadingDetails = true, errorMessage = null)
             val saved = youTubeRepository.isVideoInWatchlist(videoId)
-            val local = downloadRepository.getDownloadedVideo(videoId)
+            val variants = downloadRepository.getDownloadedVideosForVideo(videoId)
+            val local = variants.firstOrNull()
 
             if (local != null) {
                 _uiState.value = _uiState.value.copy(
                     offlineDownload = local,
+                    offlineVariants = variants,
                     playerMode = PlayerMode.OFFLINE_VAULT
                 )
             }
@@ -112,7 +122,7 @@ class WatchViewModel(
                     _uiState.value = _uiState.value.copy(
                         isLoadingDetails = false,
                         isSavedToWatchlist = saved,
-                        errorMessage = "Set YOUTUBE_API_KEY in Secrets or Remote Config to load channel stats, comments & related videos."
+                        errorMessage = "Video metadata syncing — check connection if details do not load."
                     )
                 }
                 is ApiResult.Error -> {
@@ -165,9 +175,11 @@ class WatchViewModel(
         )
     }
 
-    fun switchToOfflinePlayer() {
-        if (_uiState.value.offlineDownload != null) {
+    fun switchToOfflinePlayer(selected: DownloadedVideoEntity? = null) {
+        val target = selected ?: _uiState.value.offlineDownload
+        if (target != null) {
             _uiState.value = _uiState.value.copy(
+                offlineDownload = target,
                 playerMode = PlayerMode.OFFLINE_VAULT,
                 streamErrorMessage = null
             )

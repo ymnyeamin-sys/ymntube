@@ -108,7 +108,7 @@ fun DownloadsScreen(
                     color = TextPrimary
                 )
                 Text(
-                    text = "Saved inside VeloTube Vault and synced to Movies/VeloTube in your device Gallery.",
+                    text = "Saved inside YmnTube Vault and synced to Movies/YmnTube in your device Gallery.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = TextSecondary
                 )
@@ -229,7 +229,7 @@ fun DownloadsScreen(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "Offline Vault (${downloadedList.size})",
+                    text = "YmnTube Vault (${downloadedList.size})",
                     style = MaterialTheme.typography.titleMedium,
                     color = TextPrimary
                 )
@@ -281,7 +281,7 @@ fun DownloadsScreen(
                 }
             }
         } else {
-            items(downloadedList, key = { it.videoId }) { entity ->
+            items(downloadedList, key = { it.downloadId }) { entity ->
                 DownloadedVaultCard(
                     entity = entity,
                     onPlayOffline = { onPlayOffline(entity) },
@@ -325,19 +325,19 @@ private fun ActiveDownloadCard(
                         overflow = TextOverflow.Ellipsis
                     )
                     val statusLabel = when (job.status) {
-                        DownloadJobStatus.QUEUED -> "Queued…"
-                        DownloadJobStatus.RESOLVING -> "Generating download link…"
+                        DownloadJobStatus.QUEUED -> "Downloading • 0%"
+                        DownloadJobStatus.RESOLVING -> "Downloading • 0%"
                         DownloadJobStatus.DOWNLOADING -> {
-                            val pct = (job.progress * 100).toInt()
+                            val pct = (job.progress * 100f).toInt().coerceIn(0, 100)
                             val downloaded = FormatUtils.formatBytes(job.bytesDownloaded)
                             if (job.totalBytes > 0) {
-                                "$pct% • $downloaded / ${FormatUtils.formatBytes(job.totalBytes)}"
+                                "Downloading • $pct% ($downloaded / ${FormatUtils.formatBytes(job.totalBytes)})"
                             } else {
-                                "Downloading • $downloaded"
+                                "Downloading • $pct% ($downloaded)"
                             }
                         }
-                        DownloadJobStatus.EXPORTING_GALLERY -> "Syncing to device Gallery…"
-                        DownloadJobStatus.COMPLETED -> "Completed & synced"
+                        DownloadJobStatus.EXPORTING_GALLERY -> "Saving to Gallery • 100%"
+                        DownloadJobStatus.COMPLETED -> "Completed & synced (100%)"
                         DownloadJobStatus.FAILED -> job.errorMessage ?: "Download failed"
                     }
                     Text(
@@ -367,7 +367,8 @@ private fun ActiveDownloadCard(
                 }
             }
 
-            if (job.status == DownloadJobStatus.RESOLVING ||
+            if (job.status == DownloadJobStatus.QUEUED ||
+                job.status == DownloadJobStatus.RESOLVING ||
                 job.status == DownloadJobStatus.DOWNLOADING ||
                 job.status == DownloadJobStatus.EXPORTING_GALLERY
             ) {
@@ -414,7 +415,7 @@ private fun DownloadedVaultCard(
             .fillMaxWidth()
             .border(1.dp, OutlineSubtle, RoundedCornerShape(18.dp))
             .clickable(onClick = onPlayOffline)
-            .testTag("downloaded_card_${entity.videoId}")
+            .testTag("downloaded_card_${entity.downloadId}")
     ) {
         Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(
@@ -549,7 +550,7 @@ private fun DownloadedVaultCard(
                     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
                     modifier = Modifier
                         .weight(1.15f)
-                        .testTag("gallery_btn_${entity.videoId}")
+                        .testTag("gallery_btn_${entity.downloadId}")
                 ) {
                     Icon(
                         imageVector = Icons.Rounded.PermMedia,

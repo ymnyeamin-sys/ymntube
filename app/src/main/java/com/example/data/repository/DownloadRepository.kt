@@ -12,11 +12,15 @@ import android.os.Environment
 import android.provider.MediaStore
 import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
+import com.example.BuildConfig
 import com.example.data.local.DownloadedVideoEntity
+import com.example.data.local.FIXED_APP_UPDATE_URL
+import com.example.data.local.FIXED_REMOTE_CONFIG_URL
 import com.example.data.local.UserPreferencesRepository
 import com.example.data.local.VeloTubeDao
 import com.example.data.model.ActiveDownload
 import com.example.data.model.ApiResult
+import com.example.data.model.AppUpdateInfo
 import com.example.data.model.DownloadFormat
 import com.example.data.model.DownloadJobStatus
 import com.example.data.model.DownloadQualityResponse
@@ -25,7 +29,6 @@ import com.example.data.model.RemoteAppConfig
 import com.example.data.model.SelectedQualityInfo
 import com.example.data.model.UrlRequestBody
 import com.example.data.model.VideoItem
-import com.example.data.remote.ApiClient
 import com.example.data.remote.DownloaderApiService
 import com.example.data.remote.FormatUtils
 import kotlinx.coroutines.CancellationException
@@ -311,6 +314,47 @@ internal object DownloaderResponseParser {
         )
     }
 
+    fun parseAppUpdateInfo(rawJson: String): AppUpdateInfo? {
+        val json = runCatching { JSONObject(rawJson) }.getOrNull() ?: return null
+        val enabled = when {
+            json.has("update_enabled") -> json.optBoolean("update_enabled", false)
+            json.has("enabled") -> json.optBoolean("enabled", false)
+            json.has("update") -> json.optBoolean("update", false)
+            json.has("is_update_available") -> json.optBoolean("is_update_available", false)
+            json.has("active") -> json.optBoolean("active", false)
+            else -> false
+        }
+        val version = json.optString("version").takeIf { it.isNotBlank() && it != "null" }
+            ?: json.optString("latest_version").takeIf { it.isNotBlank() && it != "null" }
+            ?: json.optString("version_name").takeIf { it.isNotBlank() && it != "null" }
+            ?: ""
+        val versionCode = when {
+            json.has("version_code") -> json.optInt("version_code", 0)
+            json.has("versionCode") -> json.optInt("versionCode", 0)
+            else -> 0
+        }
+        val updateUrl = json.optString("update_url").takeIf { it.isNotBlank() && it != "null" }
+            ?: json.optString("url").takeIf { it.isNotBlank() && it != "null" }
+            ?: json.optString("download_url").takeIf { it.isNotBlank() && it != "null" }
+            ?: json.optString("apk_url").takeIf { it.isNotBlank() && it != "null" }
+            ?: ""
+        val title = json.optString("title").takeIf { it.isNotBlank() && it != "null" }
+            ?: "Update Available"
+        val changelog = json.optString("changelog").takeIf { it.isNotBlank() && it != "null" }
+            ?: json.optString("message").takeIf { it.isNotBlank() && it != "null" }
+            ?: json.optString("notes").takeIf { it.isNotBlank() && it != "null" }
+            ?: json.optString("description").takeIf { it.isNotBlank() && it != "null" }
+            ?: ""
+        return AppUpdateInfo(
+            updateEnabled = enabled,
+            version = version.trim(),
+            versionCode = versionCode,
+            updateUrl = updateUrl.trim(),
+            title = title.trim(),
+            changelog = changelog.trim()
+        )
+    }
+
     private fun parseFlexibleLong(value: Any?): Long? {
         return when (value) {
             is Number -> value.toLong()
@@ -336,14 +380,18 @@ class DownloadRepository(
     val downloadedVideos: Flow<List<DownloadedVideoEntity>> = dao.observeDownloadedVideos()
     val downloadedVideoIds: Flow<List<String>> = dao.observeDownloadedIds()
 
-    suspend fun getDownloadedVideo(videoId: String): DownloadedVideoEntity? {
-        return dao.getDownloadedVideoById(videoId)
+    suspend fun getDownloadedVideoByKey(downloadId: String): DownloadedVideoEntity? {
+        return dao.getDownloadedVideoByKey(downloadId)
     }
 
-    suspend fun syncRemoteConfig(configUrl: String): ApiResult<RemoteAppConfig> {
-        val cleanUrl = configUrl.trim()
+    suspend fun getDownloadedVideosForVideo(videoId: String): List<DownloadedVideoEntity> {
+        return dao.getDownloadedVideosForVideo(videoId)
+    }
+
+    suspend fun syncRemoteConfig(configUrl: String = FIXED_REMOTE_CONFIG_URL): ApiResult<RemoteAppConfig> {
+        val cleanUrl = configUrl.trim().ifBlank { FIXED_REMOTE_CONFIG_URL }
         if (!cleanUrl.startsWith("http://") && !cleanUrl.startsWith("https://")) {
-            return ApiResult.Error("Enter a valid http(s) URL for the remote config JSON.")
+            return ApiResult.Error("Invalid remote config URL.")
         }
         return try {
             val response = downloaderApi.fetchRemoteConfig(cleanUrl)
@@ -351,7 +399,6 @@ class DownloadRepository(
                 return ApiResult.Error("Remote config returned HTTP ${response.code()}", response.code())
             }
             val cfg = response.body() ?: return ApiResult.Error("Empty remote config response.")
-            preferencesRepository.setRemoteConfigUrl(cleanUrl)
             preferencesRepository.applyRemoteConfig(
                 downloadApiUrl = cfg.downloadApiUrl,
                 youtubeApiKey = cfg.youtubeApiKey
@@ -360,6 +407,44 @@ class DownloadRepository(
         } catch (e: Exception) {
             ApiResult.Error(e.localizedMessage ?: "Failed to sync remote config")
         }
+    }
+
+    suspend fun checkForAppUpdate(ignoreAcknowledged: Boolean = false): AppUpdateInfo? = withContext(Dispatchers.IO) {
+        return@withContext try {
+            val response = downloaderApi.fetchRawJson(FIXED_APP_UPDATE_URL)
+            if (!response.isSuccessful) return@withContext null
+            val rawJson = response.body()?.string().orEmpty()
+            val info = DownloaderResponseParser.parseAppUpdateInfo(rawJson) ?: return@withContext null
+
+            if (!info.updateEnabled || info.updateUrl.isBlank() || info.version.isBlank()) {
+                return@withContext null
+            }
+            if (!info.updateUrl.startsWith("http://") && !info.updateUrl.startsWith("https://")) {
+                return@withContext null
+            }
+
+            if (info.versionCode > 0 && info.versionCode <= BuildConfig.VERSION_CODE) {
+                return@withContext null
+            }
+            if (info.versionCode <= 0 && info.version.equals(BuildConfig.VERSION_NAME, ignoreCase = true)) {
+                return@withContext null
+            }
+
+            val acknowledged = preferencesRepository.preferencesFlow.first().acknowledgedUpdateVersion
+            if (!ignoreAcknowledged && acknowledged.isNotBlank() &&
+                acknowledged.equals(info.version, ignoreCase = true)
+            ) {
+                return@withContext null
+            }
+
+            info
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    suspend fun acknowledgeUpdateVersion(version: String) {
+        preferencesRepository.setAcknowledgedUpdateVersion(version)
     }
 
     suspend fun resolveFormatsForVideo(
@@ -611,8 +696,9 @@ class DownloadRepository(
             thumbnailUrl = video.thumbnailUrl,
             qualityLabel = format.qualityLabel,
             progress = 0f,
+            bytesDownloaded = 0L,
             totalBytes = format.contentLengthBytes,
-            status = DownloadJobStatus.RESOLVING
+            status = DownloadJobStatus.DOWNLOADING
         )
         _activeDownloads.update { it + (downloadId to initial) }
 
@@ -623,13 +709,13 @@ class DownloadRepository(
                     .replace(Regex("[^a-zA-Z0-9._-]"), "_")
                     .take(48)
                     .trim('_')
-                    .ifBlank { "velotube_${video.id}" }
+                    .ifBlank { "ymntube_${video.id}" }
                 val safeFormat = format.formatId.replace(Regex("[^a-zA-Z0-9_-]"), "").ifBlank { "video" }
                 val fileName = "${safeTitle}_${video.id}_${safeFormat}.${format.ext}"
 
                 val appMoviesDir = File(
                     context.getExternalFilesDir(Environment.DIRECTORY_MOVIES) ?: context.filesDir,
-                    "VeloTube"
+                    "YmnTube"
                 ).apply { mkdirs() }
                 val targetFile = File(appMoviesDir, fileName)
 
@@ -647,7 +733,12 @@ class DownloadRepository(
                         val current = map[downloadId] ?: return@update map
                         map + (downloadId to current.copy(status = DownloadJobStatus.DOWNLOADING))
                     }
-                    downloadUrlToFile(format.url, targetFile, downloadId)
+                    downloadUrlToFile(
+                        downloadUrl = format.url,
+                        targetFile = targetFile,
+                        downloadId = downloadId,
+                        fallbackTotalBytes = format.contentLengthBytes
+                    )
                     finishSaveAndExport(video, format, targetFile, fileName, exportToGallery, downloadId)
                     return@launch
                 }
@@ -674,17 +765,18 @@ class DownloadRepository(
                     )
 
                 if (isVideoBinary) {
-                    val totalLen = respBody.contentLength()
+                    val headerLen = respBody.contentLength()
+                    val effectiveLen = if (headerLen > 0L) headerLen else format.contentLengthBytes
                     _activeDownloads.update { map ->
                         val current = map[downloadId] ?: return@update map
                         map + (downloadId to current.copy(
                             status = DownloadJobStatus.DOWNLOADING,
-                            totalBytes = totalLen.coerceAtLeast(0L)
+                            totalBytes = effectiveLen.coerceAtLeast(0L)
                         ))
                     }
                     streamToFileWithProgress(
                         inputStream = respBody.byteStream(),
-                        totalBytes = totalLen,
+                        totalBytes = effectiveLen,
                         targetFile = targetFile,
                         downloadId = downloadId
                     )
@@ -721,7 +813,8 @@ class DownloadRepository(
                     downloadUrlToFile(
                         downloadUrl = resolvedDownloadUrl,
                         targetFile = targetFile,
-                        downloadId = downloadId
+                        downloadId = downloadId,
+                        fallbackTotalBytes = format.contentLengthBytes
                     )
                 }
 
@@ -771,6 +864,7 @@ class DownloadRepository(
 
         val finalSize = targetFile.length()
         val entity = DownloadedVideoEntity(
+            downloadId = downloadId,
             videoId = video.id,
             title = video.title,
             channelTitle = video.channelTitle,
@@ -837,11 +931,11 @@ class DownloadRepository(
                 val fileName = "${safeTitle}.$ext"
                 val appMoviesDir = File(
                     context.getExternalFilesDir(Environment.DIRECTORY_MOVIES) ?: context.filesDir,
-                    "VeloTube"
+                    "YmnTube"
                 ).apply { mkdirs() }
                 val targetFile = File(appMoviesDir, fileName)
 
-                downloadUrlToFile(cleanUrl, targetFile, downloadId)
+                downloadUrlToFile(cleanUrl, targetFile, downloadId, 0L)
 
                 val autoGallery = preferencesRepository.preferencesFlow.first().autoExportToGallery
                 val galleryUri = if (autoGallery && ext != "m4a") {
@@ -855,6 +949,7 @@ class DownloadRepository(
                 val finalSize = targetFile.length()
                 dao.upsertDownloadedVideo(
                     DownloadedVideoEntity(
+                        downloadId = downloadId,
                         videoId = id,
                         title = title,
                         channelTitle = "Direct URL",
@@ -899,7 +994,8 @@ class DownloadRepository(
     private fun downloadUrlToFile(
         downloadUrl: String,
         targetFile: File,
-        downloadId: String
+        downloadId: String,
+        fallbackTotalBytes: Long = 0L
     ) {
         val request = Request.Builder()
             .url(downloadUrl)
@@ -911,9 +1007,11 @@ class DownloadRepository(
                 throw IllegalStateException("Download host returned HTTP ${response.code}")
             }
             val body = response.body ?: throw IllegalStateException("Empty download body")
+            val headerLen = body.contentLength()
+            val effectiveTotal = if (headerLen > 0L) headerLen else fallbackTotalBytes
             streamToFileWithProgress(
                 inputStream = body.byteStream(),
-                totalBytes = body.contentLength(),
+                totalBytes = effectiveTotal,
                 targetFile = targetFile,
                 downloadId = downloadId
             )
@@ -938,7 +1036,7 @@ class DownloadRepository(
                     downloaded += read
 
                     val now = System.currentTimeMillis()
-                    if (now - lastUpdateMs > 150L) {
+                    if (now - lastUpdateMs > 100L) {
                         lastUpdateMs = now
                         val fraction = if (totalBytes > 0) {
                             (downloaded.toFloat() / totalBytes.toFloat()).coerceIn(0f, 1f)
@@ -1012,7 +1110,7 @@ class DownloadRepository(
                 context.contentResolver.delete(uriStr.toUri(), null, null)
             }
         }
-        dao.deleteDownloadedVideo(entity.videoId)
+        dao.deleteDownloadedVideoByKey(entity.downloadId)
     }
 
     fun openInGallery(entity: DownloadedVideoEntity): Boolean {
@@ -1062,7 +1160,7 @@ class DownloadRepository(
             val values = ContentValues().apply {
                 put(MediaStore.Video.Media.DISPLAY_NAME, displayName)
                 put(MediaStore.Video.Media.MIME_TYPE, mimeType)
-                put(MediaStore.Video.Media.RELATIVE_PATH, "${Environment.DIRECTORY_MOVIES}/VeloTube")
+                put(MediaStore.Video.Media.RELATIVE_PATH, "${Environment.DIRECTORY_MOVIES}/YmnTube")
                 put(MediaStore.Video.Media.IS_PENDING, 1)
             }
             val collection = MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
@@ -1094,7 +1192,7 @@ class DownloadRepository(
                 @Suppress("DEPRECATION")
                 val publicDir = File(
                     Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES),
-                    "VeloTube"
+                    "YmnTube"
                 ).apply { mkdirs() }
                 val destFile = File(publicDir, displayName)
                 sourceFile.copyTo(destFile, overwrite = true)

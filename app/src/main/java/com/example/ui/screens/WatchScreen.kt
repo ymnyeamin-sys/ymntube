@@ -17,10 +17,8 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -35,11 +33,12 @@ import androidx.compose.material.icons.rounded.BookmarkBorder
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Comment
 import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.Downloading
 import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Fullscreen
 import androidx.compose.material.icons.rounded.FullscreenExit
-import androidx.compose.material.icons.rounded.Hd
+import androidx.compose.material.icons.rounded.Headphones
 import androidx.compose.material.icons.rounded.OfflinePin
 import androidx.compose.material.icons.rounded.PermMedia
 import androidx.compose.material.icons.rounded.PlayArrow
@@ -57,6 +56,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -78,6 +78,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import com.example.R
 import com.example.data.local.DownloadedVideoEntity
+import com.example.data.model.ActiveDownload
+import com.example.data.model.DownloadJobStatus
 import com.example.data.model.VideoItem
 import com.example.data.remote.FormatUtils
 import com.example.ui.components.CompactVideoRow
@@ -102,6 +104,9 @@ import com.example.ui.viewmodel.WatchViewModel
 fun WatchScreen(
     viewModel: WatchViewModel,
     downloadedIds: Set<String>,
+    activeDownloads: Map<String, ActiveDownload>,
+    backgroundPlayEnabled: Boolean,
+    onFullscreenChanged: (Boolean) -> Unit,
     onBack: () -> Unit,
     onRelatedClick: (VideoItem) -> Unit,
     onDownloadClick: (VideoItem) -> Unit,
@@ -114,8 +119,21 @@ fun WatchScreen(
     var isCommentsExpanded by rememberSaveable { mutableStateOf(false) }
     var isFullscreen by rememberSaveable { mutableStateOf(false) }
 
+    val activeVideoDownload = activeDownloads.values.firstOrNull {
+        it.videoId == state.video.id && (
+            it.status == DownloadJobStatus.DOWNLOADING ||
+                it.status == DownloadJobStatus.RESOLVING ||
+                it.status == DownloadJobStatus.EXPORTING_GALLERY ||
+                it.status == DownloadJobStatus.QUEUED
+            )
+    }
+
     BackHandler(enabled = isFullscreen) {
         isFullscreen = false
+    }
+
+    LaunchedEffect(isFullscreen) {
+        onFullscreenChanged(isFullscreen)
     }
 
     DisposableEffect(isFullscreen) {
@@ -130,11 +148,16 @@ fun WatchScreen(
         }
     }
 
+    DisposableEffect(Unit) {
+        onDispose {
+            onFullscreenChanged(false)
+        }
+    }
+
     Column(
         modifier = modifier
             .fillMaxSize()
             .background(ObsidianBg)
-            .then(if (isFullscreen) Modifier else Modifier.statusBarsPadding())
     ) {
         // Video Player Surface
         Box(
@@ -148,10 +171,16 @@ fun WatchScreen(
         ) {
             when (state.playerMode) {
                 PlayerMode.OFFLINE_VAULT -> {
-                    val path = state.offlineDownload?.localFilePath
-                    if (!path.isNullOrBlank()) {
+                    val dl = state.offlineDownload
+                    if (dl != null && dl.localFilePath.isNotBlank()) {
                         ExoVideoPlayer(
-                            mediaUriOrPath = path,
+                            mediaUriOrPath = dl.localFilePath,
+                            title = state.video.title,
+                            artist = state.video.channelTitle,
+                            artworkUrl = state.video.thumbnailUrl,
+                            currentItemId = dl.downloadId,
+                            backgroundPlayEnabled = backgroundPlayEnabled,
+                            isFullscreen = isFullscreen,
                             modifier = Modifier.fillMaxSize(),
                             onFullscreenToggle = { isFullscreen = it },
                             onPlaybackError = { viewModel.onNativePlaybackError(it) }
@@ -159,6 +188,7 @@ fun WatchScreen(
                     } else {
                         YouTubeWebPlayer(
                             videoId = state.video.id,
+                            backgroundPlayEnabled = backgroundPlayEnabled,
                             modifier = Modifier.fillMaxSize(),
                             onSwitchToNativePlayer = { viewModel.tryNativeExoStream() },
                             onEmbedError = { code -> viewModel.onWebPlayerError(code) }
@@ -172,6 +202,12 @@ fun WatchScreen(
                         !streamUrl.isNullOrBlank() -> {
                             ExoVideoPlayer(
                                 mediaUriOrPath = streamUrl,
+                                title = state.video.title,
+                                artist = state.video.channelTitle,
+                                artworkUrl = state.video.thumbnailUrl,
+                                currentItemId = state.video.id,
+                                backgroundPlayEnabled = backgroundPlayEnabled,
+                                isFullscreen = isFullscreen,
                                 modifier = Modifier.fillMaxSize(),
                                 onFullscreenToggle = { isFullscreen = it },
                                 onPlaybackError = { viewModel.onNativePlaybackError(it) }
@@ -194,7 +230,7 @@ fun WatchScreen(
                                         strokeWidth = 3.dp
                                     )
                                     Text(
-                                        text = "Loading HD stream…",
+                                        text = "Loading HD / Lock-Screen Stream…",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = TextSecondary
                                     )
@@ -270,6 +306,7 @@ fun WatchScreen(
                 PlayerMode.YOUTUBE_EMBED -> {
                     YouTubeWebPlayer(
                         videoId = state.video.id,
+                        backgroundPlayEnabled = backgroundPlayEnabled,
                         modifier = Modifier.fillMaxSize(),
                         onSwitchToNativePlayer = { viewModel.tryNativeExoStream() },
                         onEmbedError = { code -> viewModel.onWebPlayerError(code) }
@@ -338,23 +375,22 @@ fun WatchScreen(
                     }
                     item {
                         ModeChip(
-                            label = if (state.isResolvingStream) "Resolving HD…" else "Native ExoPlayer",
-                            icon = Icons.Rounded.Hd,
+                            label = if (state.isResolvingStream) "Loading Audio/HD…" else "Background / Native",
+                            icon = Icons.Rounded.Headphones,
                             selected = state.playerMode == PlayerMode.EXO_NATIVE_STREAM,
                             accent = CyanElectric,
                             onClick = { viewModel.tryNativeExoStream() }
                         )
                     }
-                    if (state.offlineDownload != null) {
-                        item {
-                            ModeChip(
-                                label = "Offline Vault",
-                                icon = Icons.Rounded.OfflinePin,
-                                selected = state.playerMode == PlayerMode.OFFLINE_VAULT,
-                                accent = EmeraldGallery,
-                                onClick = { viewModel.switchToOfflinePlayer() }
-                            )
-                        }
+                    items(state.offlineVariants, key = { it.downloadId }) { variant ->
+                        ModeChip(
+                            label = "Offline ${variant.qualityLabel}",
+                            icon = Icons.Rounded.OfflinePin,
+                            selected = state.playerMode == PlayerMode.OFFLINE_VAULT &&
+                                state.offlineDownload?.downloadId == variant.downloadId,
+                            accent = EmeraldGallery,
+                            onClick = { viewModel.switchToOfflinePlayer(variant) }
+                        )
                     }
                 }
             }
@@ -433,16 +469,34 @@ fun WatchScreen(
                 }
             }
 
-            // Action Pill Row (Download, Gallery if downloaded, Save, Share)
+            // Action Pill Row (Download / Download another quality, Gallery if downloaded, Save, Share)
             item {
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     item {
-                        val isDownloaded = state.offlineDownload != null
+                        val isDownloaded = state.offlineVariants.isNotEmpty()
+                        val pct = ((activeVideoDownload?.progress ?: 0f) * 100f).toInt().coerceIn(0, 100)
+                        val label = when {
+                            activeVideoDownload != null -> "Downloading $pct%"
+                            isDownloaded -> "Saved • +Quality"
+                            else -> stringResource(R.string.download_video)
+                        }
                         ActionPill(
-                            icon = if (isDownloaded) Icons.Rounded.CheckCircle else Icons.Rounded.Download,
-                            label = if (isDownloaded) "Downloaded" else stringResource(R.string.download_video),
-                            containerColor = if (isDownloaded) EmeraldSoft else CrimsonAccent,
-                            contentColor = if (isDownloaded) EmeraldGallery else TextPrimary,
+                            icon = when {
+                                activeVideoDownload != null -> Icons.Rounded.Downloading
+                                isDownloaded -> Icons.Rounded.CheckCircle
+                                else -> Icons.Rounded.Download
+                            },
+                            label = label,
+                            containerColor = when {
+                                activeVideoDownload != null -> CyanSoft
+                                isDownloaded -> EmeraldSoft
+                                else -> CrimsonAccent
+                            },
+                            contentColor = when {
+                                activeVideoDownload != null -> CyanElectric
+                                isDownloaded -> EmeraldGallery
+                                else -> TextPrimary
+                            },
                             onClick = { onDownloadClick(state.video) },
                             modifier = Modifier.testTag("watch_download_button")
                         )
@@ -667,9 +721,11 @@ fun WatchScreen(
                     )
                 }
                 items(state.relatedVideos, key = { it.id }) { related ->
+                    val relatedJob = activeDownloads.values.firstOrNull { it.videoId == related.id }
                     CompactVideoRow(
                         video = related,
                         isDownloaded = related.id in downloadedIds,
+                        activeDownload = relatedJob,
                         onClick = { onRelatedClick(related) },
                         onDownloadClick = { onDownloadClick(related) }
                     )

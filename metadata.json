@@ -1,6 +1,6 @@
 {
-  "name": "VeloTube",
-  "description": "Clean dark-theme YouTube alternative powered by YouTube Data API v3 with integrated video downloader, offline Media3 player, and automatic Gallery export.",
+  "name": "YmnTube",
+  "description": "Clean dark-theme YouTube alternative powered by YouTube Data API v3 with personalized home feed, multi-resolution downloader, background lock-screen Media3 player, and Gallery sync.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

@@ -7,6 +7,7 @@ import okhttp3.ResponseBody
 import retrofit2.Response
 import retrofit2.http.Body
 import retrofit2.http.GET
+import retrofit2.http.Header
 import retrofit2.http.POST
 import retrofit2.http.Url
 
@@ -42,6 +43,13 @@ interface DownloaderApiService {
 
     @GET
     suspend fun fetchRemoteConfig(
-        @Url configUrl: String
+        @Url configUrl: String,
+        @Header("Cache-Control") cacheControl: String = "no-cache"
     ): Response<RemoteAppConfig>
+
+    @GET
+    suspend fun fetchRawJson(
+        @Url url: String,
+        @Header("Cache-Control") cacheControl: String = "no-cache"
+    ): Response<ResponseBody>
 }

@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.data.local.UserPreferencesRepository
+import com.example.data.model.ActiveDownload
 import com.example.data.model.ApiResult
 import com.example.data.model.VideoItem
 import com.example.data.model.YouTubeCategory
@@ -46,15 +47,20 @@ class HomeViewModel(
         .map { it.toSet() }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptySet())
 
+    val activeDownloads: StateFlow<Map<String, ActiveDownload>> = downloadRepository.activeDownloads
+
     init {
-        loadTrending(YouTubeCategory.ALL)
+        viewModelScope.launch {
+            downloadRepository.syncRemoteConfig()
+            loadHomeFeed(_selectedCategory.value)
+        }
         viewModelScope.launch {
             preferencesRepository.preferencesFlow
                 .map { it.regionCode to it.youtubeApiKeyOverride }
                 .distinctUntilChanged()
                 .drop(1)
                 .collect {
-                    loadTrending(_selectedCategory.value)
+                    loadHomeFeed(_selectedCategory.value)
                 }
         }
     }
@@ -62,14 +68,18 @@ class HomeViewModel(
     fun selectCategory(category: YouTubeCategory) {
         if (_selectedCategory.value == category && _feedState.value is FeedUiState.Success) return
         _selectedCategory.value = category
-        loadTrending(category)
+        loadHomeFeed(category)
     }
 
     fun refresh() {
-        loadTrending(_selectedCategory.value, isPullRefresh = true)
+        viewModelScope.launch {
+            _isRefreshing.value = true
+            downloadRepository.syncRemoteConfig()
+            loadHomeFeed(_selectedCategory.value, isPullRefresh = true)
+        }
     }
 
-    fun loadTrending(category: YouTubeCategory, isPullRefresh: Boolean = false) {
+    fun loadHomeFeed(category: YouTubeCategory, isPullRefresh: Boolean = false) {
         viewModelScope.launch {
             if (isPullRefresh) {
                 _isRefreshing.value = true
@@ -77,7 +87,7 @@ class HomeViewModel(
                 _feedState.value = FeedUiState.Loading
             }
             val region = preferencesRepository.preferencesFlow.first().regionCode
-            when (val result = youTubeRepository.getTrendingVideos(category, region)) {
+            when (val result = youTubeRepository.getHomeSuggestions(category, region)) {
                 is ApiResult.Success -> _feedState.value = FeedUiState.Success(result.data)
                 is ApiResult.Error -> _feedState.value = FeedUiState.Error(result.message)
                 is ApiResult.MissingApiKey -> _feedState.value = FeedUiState.MissingApiKey(result.keyName)

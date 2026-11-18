@@ -48,6 +48,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
+import com.example.data.model.ActiveDownload
 import com.example.data.model.VideoItem
 import com.example.ui.components.ApiSetupBanner
 import com.example.ui.components.CompactVideoRow
@@ -65,6 +66,7 @@ import com.example.ui.viewmodel.SearchViewModel
 @Composable
 fun SearchScreen(
     viewModel: SearchViewModel,
+    activeDownloads: Map<String, ActiveDownload>,
     onVideoClick: (VideoItem) -> Unit,
     onDownloadClick: (VideoItem) -> Unit,
     modifier: Modifier = Modifier
@@ -285,7 +287,7 @@ fun SearchScreen(
             is SearchUiState.MissingApiKey -> {
                 ApiSetupBanner(
                     missingKeyName = state.keyName,
-                    description = "Configure YOUTUBE_API_KEY in AI Studio Secrets to enable live YouTube search.",
+                    description = "YmnTube loads its YouTube configuration automatically via remote sync. Check your internet connection and tap Sync & Retry.",
                     onRetry = { viewModel.submitSearch() }
                 )
             }
@@ -314,9 +316,11 @@ fun SearchScreen(
                     modifier = Modifier.testTag("search_results_list")
                 ) {
                     items(state.videos, key = { it.id }) { video ->
+                        val activeJob = activeDownloads.values.firstOrNull { it.videoId == video.id }
                         CompactVideoRow(
                             video = video,
                             isDownloaded = video.id in downloadedIds,
+                            activeDownload = activeJob,
                             onClick = { onVideoClick(video) },
                             onDownloadClick = { onDownloadClick(video) }
                         )

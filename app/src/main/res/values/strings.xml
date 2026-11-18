@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">VeloTube</string>
+    <string name="app_name">YmnTube</string>
     <string name="nav_home">Home</string>
     <string name="nav_search">Search</string>
     <string name="nav_downloads">Downloads</string>
@@ -9,7 +9,7 @@
     <string name="download_video">Download</string>
     <string name="open_in_gallery">Open in Gallery</string>
     <string name="saved_in_gallery">In Gallery</string>
-    <string name="api_setup_title">Connect Your APIs</string>
+    <string name="api_setup_title">Configuration Sync Needed</string>
     <string name="empty_downloads_title">Your Offline Vault is Empty</string>
-    <string name="empty_downloads_subtitle">Download any video to watch offline inside VeloTube and access it directly from your device Gallery.</string>
+    <string name="empty_downloads_subtitle">Download any video in any quality to watch offline inside YmnTube and access it directly from your device Gallery.</string>
 </resources>

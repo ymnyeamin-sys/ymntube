@@ -1,5 +1,6 @@
 package com.example.data.repository
 
+import com.example.data.local.DEFAULT_REGION_CODE
 import com.example.data.local.SearchHistoryEntity
 import com.example.data.local.UserPreferencesRepository
 import com.example.data.local.VeloTubeDao
@@ -13,6 +14,8 @@ import com.example.data.model.YouTubeVideoResource
 import com.example.data.remote.ApiClient
 import com.example.data.remote.FormatUtils
 import com.example.data.remote.YouTubeApiService
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import retrofit2.HttpException
@@ -31,27 +34,141 @@ class YouTubeRepository(
         return ApiClient.getEffectiveYouTubeApiKey(overrideKey)
     }
 
-    suspend fun getTrendingVideos(
+    /**
+     * Personalized Home feed based on user taste (watch history, saved videos, searches),
+     * blended with fresh regional (BD) videos when history is sparse or empty.
+     */
+    suspend fun getHomeSuggestions(
         category: YouTubeCategory,
-        regionCode: String = "US"
-    ): ApiResult<List<VideoItem>> {
+        regionCode: String = DEFAULT_REGION_CODE
+    ): ApiResult<List<VideoItem>> = coroutineScope {
         val apiKey = resolveApiKey()
-            ?: return ApiResult.MissingApiKey("YOUTUBE_API_KEY")
+            ?: return@coroutineScope ApiResult.MissingApiKey("YOUTUBE_API_KEY")
 
-        return try {
-            val response = api.getPopularVideos(
-                regionCode = regionCode,
-                videoCategoryId = category.categoryId,
-                maxResults = 25,
-                apiKey = apiKey
-            )
-            val videos = enrichWithChannelAvatars(response.items.map { it.toDomain() }, apiKey)
-            ApiResult.Success(videos)
+        try {
+            if (category == YouTubeCategory.ALL) {
+                val recentSearches = runCatching { dao.observeSearchHistory().first() }.getOrDefault(emptyList())
+                val recentWatches = runCatching { dao.observeWatchHistory().first() }.getOrDefault(emptyList())
+                val savedVideos = runCatching { dao.observeWatchlist().first() }.getOrDefault(emptyList())
+
+                val tasteQueries = buildTasteQueries(recentSearches, recentWatches, savedVideos)
+
+                val popularDeferred = async {
+                    runCatching {
+                        api.getPopularVideos(
+                            regionCode = regionCode,
+                            videoCategoryId = null,
+                            maxResults = 16,
+                            apiKey = apiKey
+                        ).items.map { it.toDomain() }
+                    }.getOrDefault(emptyList())
+                }
+
+                val personalizedDeferreds = tasteQueries.map { query ->
+                    async {
+                        runCatching {
+                            val searchResp = api.searchVideos(
+                                query = query,
+                                maxResults = 10,
+                                apiKey = apiKey
+                            )
+                            val ids = searchResp.items.mapNotNull { it.id?.videoId }.distinct()
+                            if (ids.isEmpty()) emptyList()
+                            else api.getVideosByIds(ids = ids.joinToString(","), apiKey = apiKey)
+                                .items.map { it.toDomain() }
+                        }.getOrDefault(emptyList())
+                    }
+                }
+
+                val personalizedVideos = personalizedDeferreds.flatMap { it.await() }
+                val regionalVideos = popularDeferred.await()
+
+                val watchedIds = recentWatches.map { it.videoId }.toSet()
+                val combined = (personalizedVideos + regionalVideos)
+                    .distinctBy { it.id }
+
+                if (combined.isEmpty()) {
+                    // Fallback query if both regional popular & taste failed
+                    val fallbackResp = api.searchVideos(
+                        query = if (regionCode == "BD") "Bangla music natok tech" else "popular videos",
+                        maxResults = 20,
+                        apiKey = apiKey
+                    )
+                    val ids = fallbackResp.items.mapNotNull { it.id?.videoId }.distinct()
+                    if (ids.isEmpty()) return@coroutineScope ApiResult.Success(emptyList())
+                    val details = api.getVideosByIds(ids = ids.joinToString(","), apiKey = apiKey)
+                    val enriched = enrichWithChannelAvatars(details.items.map { it.toDomain() }, apiKey)
+                    return@coroutineScope ApiResult.Success(enriched)
+                }
+
+                // Put fresh/unwatched personalized picks first, keeping watched items at the end
+                val (fresh, seen) = combined.partition { it.id !in watchedIds }
+                val ordered = (fresh + seen).take(30)
+                val enriched = enrichWithChannelAvatars(ordered, apiKey)
+                return@coroutineScope ApiResult.Success(enriched)
+            } else {
+                val categoryVideos = runCatching {
+                    api.getPopularVideos(
+                        regionCode = regionCode,
+                        videoCategoryId = category.categoryId,
+                        maxResults = 24,
+                        apiKey = apiKey
+                    ).items.map { it.toDomain() }
+                }.getOrNull().orEmpty()
+
+                if (categoryVideos.isNotEmpty()) {
+                    return@coroutineScope ApiResult.Success(enrichWithChannelAvatars(categoryVideos, apiKey))
+                }
+
+                // Some categories (e.g. Tech/Learn/Gaming in BD) aren't indexed on chart=mostPopular;
+                // fall back cleanly to regional category search.
+                val searchResp = api.searchVideos(
+                    query = "${category.label} ${if (regionCode == "BD") "Bangladesh" else ""}".trim(),
+                    maxResults = 24,
+                    apiKey = apiKey
+                )
+                val ids = searchResp.items.mapNotNull { it.id?.videoId }.distinct()
+                if (ids.isEmpty()) return@coroutineScope ApiResult.Success(emptyList())
+                val details = api.getVideosByIds(ids = ids.joinToString(","), apiKey = apiKey)
+                val videos = enrichWithChannelAvatars(details.items.map { it.toDomain() }, apiKey)
+                return@coroutineScope ApiResult.Success(videos)
+            }
         } catch (e: HttpException) {
             ApiResult.Error(parseHttpError(e), e.code())
         } catch (e: Exception) {
             ApiResult.Error(e.localizedMessage ?: "Failed to load videos")
         }
+    }
+
+    private fun buildTasteQueries(
+        searches: List<SearchHistoryEntity>,
+        watches: List<WatchHistoryEntity>,
+        saved: List<WatchHistoryEntity>
+    ): List<String> {
+        val signals = mutableListOf<String>()
+
+        // 1. Most recent searches reflect explicit user intent
+        searches.take(2).forEach { s ->
+            val clean = s.query.trim()
+            if (clean.length >= 2) signals.add(clean)
+        }
+
+        // 2. Favorite channels or topics from saved/watched videos
+        val preferredEntries = (saved.take(3) + watches.take(5)).distinctBy { it.videoId }
+        preferredEntries
+            .mapNotNull { entry ->
+                val words = entry.title
+                    .replace(Regex("[^\\p{L}\\p{N}\\s]"), " ")
+                    .split(Regex("\\s+"))
+                    .filter { it.length >= 4 }
+                    .take(3)
+                if (words.isNotEmpty()) words.joinToString(" ")
+                else entry.channelTitle.takeIf { it.isNotBlank() }
+            }
+            .take(2)
+            .forEach { signals.add(it) }
+
+        return signals.distinct().take(3)
     }
 
     suspend fun searchVideos(query: String): ApiResult<List<VideoItem>> {

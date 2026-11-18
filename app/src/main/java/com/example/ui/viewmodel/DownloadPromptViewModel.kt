@@ -3,9 +3,11 @@ package com.example.ui.viewmodel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.example.BuildConfig
 import com.example.data.local.DownloadedVideoEntity
 import com.example.data.local.UserPreferencesRepository
 import com.example.data.model.ApiResult
+import com.example.data.model.AppUpdateInfo
 import com.example.data.model.DownloadFormat
 import com.example.data.model.VideoItem
 import com.example.data.remote.FormatUtils
@@ -50,6 +52,38 @@ class DownloadPromptViewModel(
     private val _statusToast = MutableStateFlow<String?>(null)
     val statusToast: StateFlow<String?> = _statusToast.asStateFlow()
 
+    private val _availableUpdate = MutableStateFlow<AppUpdateInfo?>(null)
+    val availableUpdate: StateFlow<AppUpdateInfo?> = _availableUpdate.asStateFlow()
+
+    fun checkForAppUpdate(manual: Boolean = false) {
+        viewModelScope.launch {
+            val update = downloadRepository.checkForAppUpdate(ignoreAcknowledged = manual)
+            if (update != null) {
+                _availableUpdate.value = update
+            } else if (manual) {
+                _statusToast.value = "YmnTube v${BuildConfig.VERSION_NAME} is up to date"
+            }
+        }
+    }
+
+    fun onUpdateAccepted(info: AppUpdateInfo) {
+        _availableUpdate.value = null
+        viewModelScope.launch {
+            downloadRepository.acknowledgeUpdateVersion(info.version)
+        }
+    }
+
+    fun onSkipUpdateVersion(info: AppUpdateInfo) {
+        _availableUpdate.value = null
+        viewModelScope.launch {
+            downloadRepository.acknowledgeUpdateVersion(info.version)
+        }
+    }
+
+    fun dismissUpdateDialog() {
+        _availableUpdate.value = null
+    }
+
     fun openDownloadSheet(video: VideoItem) {
         _sheetState.value = DownloadSheetState.Resolving(video.title.ifBlank { "Fetching resolutions…" })
         viewModelScope.launch {
@@ -82,7 +116,7 @@ class DownloadPromptViewModel(
 
         if (FormatUtils.isDirectMediaUrl(trimmed)) {
             downloadRepository.startDirectUrlDownload(trimmed)
-            _statusToast.value = "Direct media download started"
+            _statusToast.value = "Downloading direct media…"
             return
         }
 
@@ -110,11 +144,7 @@ class DownloadPromptViewModel(
         viewModelScope.launch {
             val autoGallery = preferencesRepository.preferencesFlow.first().autoExportToGallery
             downloadRepository.startDownload(video, format, exportToGallery = autoGallery)
-            _statusToast.value = if (autoGallery && format.hasVideo) {
-                "Generating ${format.qualityLabel} link — will save to Vault & Gallery"
-            } else {
-                "Generating ${format.qualityLabel} link — will save to VeloTube Vault"
-            }
+            _statusToast.value = "Downloading ${format.qualityLabel}…"
         }
     }
 
@@ -141,7 +171,7 @@ class DownloadPromptViewModel(
         viewModelScope.launch {
             val ok = downloadRepository.exportExistingToGallery(entity)
             _statusToast.value = if (ok) {
-                "Saved to device Gallery (Movies/VeloTube)"
+                "Saved to device Gallery (Movies/YmnTube)"
             } else {
                 "Gallery export failed — check storage permissions"
             }
@@ -158,7 +188,7 @@ class DownloadPromptViewModel(
     fun deleteVideo(entity: DownloadedVideoEntity) {
         viewModelScope.launch {
             downloadRepository.deleteDownloadedVideo(entity)
-            _statusToast.value = "Removed from VeloTube Vault"
+            _statusToast.value = "Removed from YmnTube Vault"
         }
     }
 

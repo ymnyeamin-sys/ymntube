@@ -31,6 +31,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
@@ -60,6 +61,7 @@ import com.example.data.model.YouTubeCategory
 import com.example.ui.components.ApiSetupBanner
 import com.example.ui.components.VideoCard
 import com.example.ui.theme.CrimsonAccent
+import com.example.ui.theme.CyanElectric
 import com.example.ui.theme.ObsidianBg
 import com.example.ui.theme.OutlineSubtle
 import com.example.ui.theme.SurfaceLevel1
@@ -82,6 +84,7 @@ fun HomeScreen(
     val selectedCategory by viewModel.selectedCategory.collectAsStateWithLifecycle()
     val isRefreshing by viewModel.isRefreshing.collectAsStateWithLifecycle()
     val downloadedIds by viewModel.downloadedIds.collectAsStateWithLifecycle()
+    val activeDownloads by viewModel.activeDownloads.collectAsStateWithLifecycle()
 
     Column(
         modifier = modifier
@@ -119,7 +122,7 @@ fun HomeScreen(
                     )
                 }
                 Text(
-                    text = "VeloTube",
+                    text = "YmnTube",
                     style = MaterialTheme.typography.headlineSmall,
                     color = TextPrimary,
                     fontWeight = FontWeight.Bold
@@ -173,7 +176,29 @@ fun HomeScreen(
             }
         }
 
-        Spacer(modifier = Modifier.height(8.dp))
+        if (selectedCategory == YouTubeCategory.ALL) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.AutoAwesome,
+                    contentDescription = null,
+                    tint = CyanElectric,
+                    modifier = Modifier.size(15.dp)
+                )
+                Text(
+                    text = "Suggested for your taste",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = TextSecondary
+                )
+            }
+        } else {
+            Spacer(modifier = Modifier.height(8.dp))
+        }
 
         PullToRefreshBox(
             isRefreshing = isRefreshing,
@@ -211,7 +236,7 @@ fun HomeScreen(
                             item(span = { GridItemSpan(1) }) {
                                 ApiSetupBanner(
                                     missingKeyName = state.keyName,
-                                    description = "VeloTube uses the official YouTube Data API v3 to stream trending feeds, search results, channel statistics, and comments. Add your YouTube Data API v3 key in the AI Studio Secrets panel, then tap Retry.",
+                                    description = "YmnTube loads its YouTube and download configuration automatically via remote sync. Please check your internet connection and tap Sync & Retry.",
                                     onRetry = { viewModel.refresh() }
                                 )
                             }
@@ -279,9 +304,13 @@ fun HomeScreen(
                                 .testTag("home_feed_list")
                         ) {
                             items(state.videos, key = { it.id }) { video ->
+                                val activeJob = activeDownloads.values.firstOrNull {
+                                    it.videoId == video.id
+                                }
                                 VideoCard(
                                     video = video,
                                     isDownloaded = video.id in downloadedIds,
+                                    activeDownload = activeJob,
                                     onClick = { onVideoClick(video) },
                                     onDownloadClick = { onDownloadClick(video) }
                                 )

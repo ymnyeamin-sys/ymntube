@@ -11,17 +11,20 @@ interface VeloTubeDao {
     @Query("SELECT * FROM downloaded_videos ORDER BY downloadedAt DESC")
     fun observeDownloadedVideos(): Flow<List<DownloadedVideoEntity>>
 
-    @Query("SELECT * FROM downloaded_videos WHERE videoId = :videoId LIMIT 1")
-    suspend fun getDownloadedVideoById(videoId: String): DownloadedVideoEntity?
+    @Query("SELECT * FROM downloaded_videos WHERE downloadId = :downloadId LIMIT 1")
+    suspend fun getDownloadedVideoByKey(downloadId: String): DownloadedVideoEntity?
 
-    @Query("SELECT videoId FROM downloaded_videos")
+    @Query("SELECT * FROM downloaded_videos WHERE videoId = :videoId ORDER BY downloadedAt DESC")
+    suspend fun getDownloadedVideosForVideo(videoId: String): List<DownloadedVideoEntity>
+
+    @Query("SELECT DISTINCT videoId FROM downloaded_videos")
     fun observeDownloadedIds(): Flow<List<String>>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertDownloadedVideo(video: DownloadedVideoEntity)
 
-    @Query("DELETE FROM downloaded_videos WHERE videoId = :videoId")
-    suspend fun deleteDownloadedVideo(videoId: String)
+    @Query("DELETE FROM downloaded_videos WHERE downloadId = :downloadId")
+    suspend fun deleteDownloadedVideoByKey(downloadId: String)
 
     @Query("SELECT * FROM watch_history ORDER BY watchedAt DESC LIMIT 50")
     fun observeWatchHistory(): Flow<List<WatchHistoryEntity>>

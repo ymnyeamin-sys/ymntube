@@ -22,6 +22,6 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "VeloTube"
+rootProject.name = "YmnTube"
 
 include(":app")
