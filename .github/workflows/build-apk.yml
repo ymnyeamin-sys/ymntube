@@ -35,22 +35,58 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Resolve build configuration
+        id: vars
+        env:
+          INPUT_BUILD_TYPE: ${{ inputs.build_type }}
+          INPUT_RUN_TESTS: ${{ inputs.run_tests }}
+          INPUT_CREATE_RELEASE: ${{ inputs.create_release }}
+        run: |
+          VARIANT="${INPUT_BUILD_TYPE:-debug}"
+          RUN_TESTS="${INPUT_RUN_TESTS:-true}"
+          CREATE_RELEASE="${INPUT_CREATE_RELEASE:-false}"
+          echo "variant=${VARIANT}" >> "$GITHUB_OUTPUT"
+          echo "run_tests=${RUN_TESTS}" >> "$GITHUB_OUTPUT"
+          echo "create_release=${CREATE_RELEASE}" >> "$GITHUB_OUTPUT"
+          echo "Build config -> variant=${VARIANT}, run_tests=${RUN_TESTS}, create_release=${CREATE_RELEASE}"
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: "21"
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
 
-      - name: Set up Gradle 9.3.1
-        uses: gradle/actions/setup-gradle@v4
+      - name: Accept Android SDK licenses
+        run: |
+          SDK_DIR="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          if [ -x "$SDK_DIR/cmdline-tools/latest/bin/sdkmanager" ]; then
+            yes | "$SDK_DIR/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+          fi
+
+      - name: Install Gradle 9.3.1 CLI
+        run: |
+          curl -sSL "https://services.gradle.org/distributions/gradle-9.3.1-bin.zip" -o /tmp/gradle-9.3.1.zip
+          sudo rm -rf /opt/gradle/gradle-9.3.1
+          sudo mkdir -p /opt/gradle
+          sudo unzip -q /tmp/gradle-9.3.1.zip -d /opt/gradle
+          rm -f /tmp/gradle-9.3.1.zip
+          echo "/opt/gradle/gradle-9.3.1/bin" >> "$GITHUB_PATH"
+
+      - name: Cache Gradle packages
+        uses: gradle/actions/setup-gradle@v6
         with:
           gradle-version: "9.3.1"
+
+      - name: Verify toolchain versions
+        run: |
+          java -version
+          gradle --version
 
       - name: Prepare debug keystore
         run: |
@@ -71,7 +107,7 @@ jobs:
           fi
 
       - name: Prepare release keystore (if building release)
-        if: ${{ (inputs.build_type || 'debug') == 'release' }}
+        if: steps.vars.outputs.variant == 'release'
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           ENV_STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
@@ -108,30 +144,30 @@ jobs:
             printf 'YOUTUBE_API_KEY=%s\n' "$SECRET_YT_KEY" > .env
             echo "Injected YOUTUBE_API_KEY from GitHub Repository Secrets."
           else
-            touch .env
-            echo "No YOUTUBE_API_KEY secret found; building with .env.example defaults (you can sync via Library -> Settings -> Remote Config)."
+            rm -f .env
+            echo "No YOUTUBE_API_KEY secret found; using .env.example defaults (you can sync via Library -> Settings -> Remote Config)."
           fi
 
       - name: Run unit & Robolectric tests
-        if: ${{ inputs.run_tests != false }}
+        if: steps.vars.outputs.run_tests == 'true'
         run: gradle :app:testDebugUnitTest --no-daemon
 
       - name: Build Debug APK
-        if: ${{ (inputs.build_type || 'debug') == 'debug' }}
+        if: steps.vars.outputs.variant == 'debug'
         run: gradle :app:assembleDebug --no-daemon
 
       - name: Build Release APK
-        if: ${{ (inputs.build_type || 'debug') == 'release' }}
+        if: steps.vars.outputs.variant == 'release'
         run: gradle :app:assembleRelease --no-daemon
 
       - name: Collect built APK
         id: collect_apk
         run: |
-          VARIANT="${{ inputs.build_type || 'debug' }}"
+          VARIANT="${{ steps.vars.outputs.variant }}"
           mkdir -p dist
-          APK_PATH=$(find app/build/outputs/apk/"$VARIANT" -name "*.apk" | head -n 1)
+          APK_PATH=$(find "app/build/outputs/apk/${VARIANT}" -name "*.apk" | head -n 1)
           if [ -z "$APK_PATH" ]; then
-            echo "Error: APK not found under app/build/outputs/apk/$VARIANT"
+            echo "Error: APK not found under app/build/outputs/apk/${VARIANT}"
             exit 1
           fi
           OUT_NAME="VeloTube-${VARIANT}-$(date +%Y%m%d-%H%M).apk"
@@ -140,18 +176,18 @@ jobs:
           ls -lh dist/
 
       - name: Upload APK artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
-          name: VeloTube-${{ inputs.build_type || 'debug' }}-APK
+          name: VeloTube-${{ steps.vars.outputs.variant }}-APK
           path: ${{ steps.collect_apk.outputs.apk_file }}
           retention-days: 30
 
       - name: Create GitHub Release (optional)
-        if: ${{ inputs.create_release == true }}
+        if: steps.vars.outputs.create_release == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v1.0.${{ github.run_number }}
-          name: VeloTube v1.0.${{ github.run_number }} (${{ inputs.build_type || 'debug' }})
+          name: VeloTube v1.0.${{ github.run_number }} (${{ steps.vars.outputs.variant }})
           files: |
             ${{ steps.collect_apk.outputs.apk_file }}
           generate_release_notes: true
