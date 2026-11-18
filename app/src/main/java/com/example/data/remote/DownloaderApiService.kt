@@ -36,6 +36,11 @@ interface DownloaderApiService {
     ): Response<ResponseBody>
 
     @GET
+    suspend fun requestDownloadGet(
+        @Url fullUrl: String
+    ): Response<ResponseBody>
+
+    @GET
     suspend fun fetchRemoteConfig(
         @Url configUrl: String
     ): Response<RemoteAppConfig>

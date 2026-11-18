@@ -53,7 +53,8 @@ data class DownloadFormat(
     val contentLengthBytes: Long,
     val hasAudio: Boolean,
     val hasVideo: Boolean,
-    val bitrate: Long = 0L
+    val bitrate: Long = 0L,
+    val rawFormatId: String? = null
 )
 
 enum class DownloadJobStatus {

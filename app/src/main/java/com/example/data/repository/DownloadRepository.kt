@@ -74,7 +74,8 @@ internal data class ParsedResolutionOption(
     val sizeBytes: Long = 0L,
     val ext: String = "mp4",
     val isAudioOnly: Boolean = false,
-    val directUrl: String? = null
+    val directUrl: String? = null,
+    val rawFormatId: String? = null
 )
 
 internal object DownloaderResponseParser {
@@ -147,8 +148,24 @@ internal object DownloaderResponseParser {
                             ?: item.optLong("filesize_approx", 0L)
                                 .takeIf { it > 0L }
                             ?: item.optLong("size", 0L)
-                        val directUrl = item.optString("url").takeIf { it.startsWith("http") }
-                            ?: item.optString("download_url").takeIf { it.startsWith("http") }
+                        val directUrl = listOf(
+                            "url",
+                            "download_url",
+                            "stream_url",
+                            "video_url",
+                            "download_endpoint",
+                            "endpoint",
+                            "path",
+                            "href"
+                        ).firstNotNullOfOrNull { key ->
+                            item.optString(key).trim().takeIf {
+                                it.isNotBlank() && it != "null" &&
+                                    (it.startsWith("http") || it.startsWith("/"))
+                            }
+                        }
+                        val rawFmtId = item.optString("format_id").takeIf { it.isNotBlank() && it != "null" }
+                            ?: item.optString("itag").takeIf { it.isNotBlank() && it != "null" }
+                            ?: item.optString("id").takeIf { it.isNotBlank() && it != "null" }
                         val isAudio = isAudioLabel(rawText) ||
                             item.optString("vcodec").equals("none", ignoreCase = true)
                         val reqQuality = normalizeRequestQuality(rawText, heightVal)
@@ -164,7 +181,8 @@ internal object DownloaderResponseParser {
                                 sizeBytes = size.coerceAtLeast(0L),
                                 ext = ext ?: if (isAudio) "m4a" else "mp4",
                                 isAudioOnly = isAudio,
-                                directUrl = directUrl
+                                directUrl = directUrl,
+                                rawFormatId = rawFmtId
                             )
                         )
                     }
@@ -355,15 +373,17 @@ class DownloadRepository(
             )
 
             val formats = parsedOptions.map { opt ->
+                val resolvedDirect = opt.directUrl?.let { resolveUrlAgainstBase(baseUrl, it) }
                 DownloadFormat(
                     formatId = opt.requestQuality,
                     qualityLabel = opt.displayLabel,
                     mimeType = if (opt.isAudioOnly) "audio/mp4" else "video/${opt.ext}",
                     ext = opt.ext,
-                    url = opt.directUrl ?: watchUrl,
+                    url = resolvedDirect ?: watchUrl,
                     contentLengthBytes = opt.sizeBytes,
                     hasAudio = true,
-                    hasVideo = !opt.isAudioOnly
+                    hasVideo = !opt.isAudioOnly,
+                    rawFormatId = opt.rawFormatId
                 )
             }
 
@@ -468,29 +488,77 @@ class DownloadRepository(
                     body = UrlRequestBody(url = watchUrl)
                 )
 
-                // If path-based /download/{quality} returns 404, try fallback /download with body quality
+                // Try compatible fallback routes if /download/{quality} returns 404
                 if (apiResp.code() == 404) {
-                    val fallbackResp = downloaderApi.requestDownloadWithBodyQuality(
+                    val bodyFallback = downloaderApi.requestDownloadWithBodyQuality(
                         fullUrl = "$baseUrl/download",
                         body = DownloadWithQualityBody(url = watchUrl, quality = format.formatId)
                     )
-                    if (fallbackResp.isSuccessful || fallbackResp.code() != 404) {
-                        apiResp = fallbackResp
-                    } else if (format.url != watchUrl && format.url.startsWith("http")) {
-                        // Direct stream URL was included inside progressive object
-                        _activeDownloads.update { map ->
-                            val current = map[downloadId] ?: return@update map
-                            map + (downloadId to current.copy(status = DownloadJobStatus.DOWNLOADING))
-                        }
-                        downloadUrlToFile(format.url, targetFile, downloadId)
-                        finishSaveAndExport(video, format, targetFile, fileName, exportToGallery, downloadId)
-                        return@launch
+                    if (bodyFallback.code() != 404) {
+                        apiResp = bodyFallback
                     }
+                }
+
+                if (apiResp.code() == 404 && !format.rawFormatId.isNullOrBlank()) {
+                    val fmtEndpoint = "$baseUrl/download/${Uri.encode(format.rawFormatId)}"
+                    val fmtFallback = downloaderApi.requestDownload(
+                        fullUrl = fmtEndpoint,
+                        body = UrlRequestBody(url = watchUrl)
+                    )
+                    if (fmtFallback.code() != 404) {
+                        apiResp = fmtFallback
+                    }
+                }
+
+                if (apiResp.code() == 404) {
+                    val snakeRoutes = listOf(
+                        "$baseUrl/download_video",
+                        "$baseUrl/download_mp4"
+                    )
+                    for (route in snakeRoutes) {
+                        val resp = runCatching {
+                            downloaderApi.requestDownloadWithBodyQuality(
+                                fullUrl = route,
+                                body = DownloadWithQualityBody(url = watchUrl, quality = format.formatId)
+                            )
+                        }.getOrNull()
+                        if (resp != null && resp.code() != 404) {
+                            apiResp = resp
+                            break
+                        }
+                    }
+                }
+
+                if (apiResp.code() == 404) {
+                    val getResp = runCatching {
+                        downloaderApi.requestDownloadGet(
+                            "$baseUrl/download/$encodedQuality?url=${Uri.encode(watchUrl)}"
+                        )
+                    }.getOrNull()
+                    if (getResp != null && getResp.code() != 404) {
+                        apiResp = getResp
+                    }
+                }
+
+                if (apiResp.code() == 404 && format.url != watchUrl && format.url.startsWith("http")) {
+                    // Direct stream URL was included inside progressive/resolutions object
+                    _activeDownloads.update { map ->
+                        val current = map[downloadId] ?: return@update map
+                        map + (downloadId to current.copy(status = DownloadJobStatus.DOWNLOADING))
+                    }
+                    downloadUrlToFile(format.url, targetFile, downloadId)
+                    finishSaveAndExport(video, format, targetFile, fileName, exportToGallery, downloadId)
+                    return@launch
                 }
 
                 if (!apiResp.isSuccessful) {
                     val errText = parseErrorBody(apiResp.errorBody()?.string())
                         ?: "Download API failed (HTTP ${apiResp.code()})"
+                    if (apiResp.code() == 404) {
+                        throw IllegalStateException(
+                            "$errText at $baseUrl/download/${format.formatId} — verify /download/{quality} is deployed on your server"
+                        )
+                    }
                     throw IllegalStateException("$errText (${format.formatId})")
                 }
 
