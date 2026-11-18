@@ -156,17 +156,39 @@ class WatchViewModel(
         }
     }
 
+    private var hasAutoFallbackAttempted = false
+
     fun switchToYouTubeEmbed() {
-        _uiState.value = _uiState.value.copy(playerMode = PlayerMode.YOUTUBE_EMBED)
+        _uiState.value = _uiState.value.copy(
+            playerMode = PlayerMode.YOUTUBE_EMBED,
+            streamErrorMessage = null
+        )
     }
 
     fun switchToOfflinePlayer() {
         if (_uiState.value.offlineDownload != null) {
-            _uiState.value = _uiState.value.copy(playerMode = PlayerMode.OFFLINE_VAULT)
+            _uiState.value = _uiState.value.copy(
+                playerMode = PlayerMode.OFFLINE_VAULT,
+                streamErrorMessage = null
+            )
         }
     }
 
-    fun tryNativeExoStream() {
+    fun onWebPlayerError(errorCode: Int) {
+        if (hasAutoFallbackAttempted || _uiState.value.playerMode != PlayerMode.YOUTUBE_EMBED) return
+        hasAutoFallbackAttempted = true
+        tryNativeExoStream(autoTriggeredByEmbedError = errorCode)
+    }
+
+    fun onNativePlaybackError(message: String) {
+        _uiState.value = _uiState.value.copy(
+            directStreamUrl = null,
+            isResolvingStream = false,
+            streamErrorMessage = message
+        )
+    }
+
+    fun tryNativeExoStream(autoTriggeredByEmbedError: Int? = null) {
         val currentUrl = _uiState.value.directStreamUrl
         if (currentUrl != null) {
             _uiState.value = _uiState.value.copy(
@@ -178,6 +200,7 @@ class WatchViewModel(
         if (_uiState.value.isResolvingStream) return
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(
+                playerMode = PlayerMode.EXO_NATIVE_STREAM,
                 isResolvingStream = true,
                 streamErrorMessage = null
             )
@@ -191,9 +214,12 @@ class WatchViewModel(
                 )
             } else {
                 val msg = (res as? ApiResult.Error)?.message ?: "Could not resolve native stream"
+                val prefix = if (autoTriggeredByEmbedError != null) {
+                    "YouTube embed restricted (Error $autoTriggeredByEmbedError). "
+                } else ""
                 _uiState.value = _uiState.value.copy(
                     isResolvingStream = false,
-                    streamErrorMessage = msg
+                    streamErrorMessage = "$prefix$msg"
                 )
             }
         }

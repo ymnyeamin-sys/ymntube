@@ -22,11 +22,18 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun `parseAvailableResolutions handles string and object arrays with canonical quality`() {
-        val stringPayload = """{"all": ["144p", "360p", "720p"]}"""
+    fun `parseAvailableResolutions handles raw digits, p-suffixed strings, and object arrays`() {
+        val numericPayload = """{"resolutions": [338, 1012, 1080], "all": ["144p"]}"""
+        val (numOpts, numErr) = DownloaderResponseParser.parseAvailableResolutions(numericPayload)
+        assertNull(numErr)
+        assertEquals(listOf("338", "1012", "1080"), numOpts.map { it.requestQuality })
+        assertEquals(listOf("338p", "1012p", "1080p"), numOpts.map { it.displayLabel })
+
+        val stringPayload = """{"all": ["144p", "360", "720p"]}"""
         val (strOpts, strErr) = DownloaderResponseParser.parseAvailableResolutions(stringPayload)
         assertNull(strErr)
-        assertEquals(listOf("144p", "360p", "720p"), strOpts.map { it.requestQuality })
+        assertEquals(listOf("144p", "360", "720p"), strOpts.map { it.requestQuality })
+        assertEquals(listOf("144p", "360p", "720p"), strOpts.map { it.displayLabel })
 
         val objectPayload = """
             {
@@ -38,8 +45,19 @@ class ExampleRobolectricTest {
         """.trimIndent()
         val (objOpts, objErr) = DownloaderResponseParser.parseAvailableResolutions(objectPayload)
         assertNull(objErr)
-        assertEquals(listOf("360p", "720p"), objOpts.map { it.requestQuality })
+        assertEquals(listOf("360", "720"), objOpts.map { it.requestQuality })
+        assertEquals(listOf("360p", "720p"), objOpts.map { it.displayLabel })
         assertEquals(1234567L, objOpts[0].sizeBytes)
+    }
+
+    @Test
+    fun `buildQualityCandidates emits both raw digits and p-suffixed fallback`() {
+        assertEquals(listOf("1080", "1080p"), DownloaderResponseParser.buildQualityCandidates("1080"))
+        assertEquals(listOf("1080p", "1080"), DownloaderResponseParser.buildQualityCandidates("1080p"))
+        assertEquals(
+            listOf("338", "338p", "18"),
+            DownloaderResponseParser.buildQualityCandidates("338", "18")
+        )
     }
 
     @Test

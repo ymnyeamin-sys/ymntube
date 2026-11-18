@@ -10,19 +10,23 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.net.toUri
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
-import androidx.core.net.toUri
 import java.io.File
 
 @OptIn(UnstableApi::class)
@@ -30,14 +34,30 @@ import java.io.File
 fun ExoVideoPlayer(
     mediaUriOrPath: String,
     modifier: Modifier = Modifier,
-    onFullscreenToggle: ((Boolean) -> Unit)? = null
+    onFullscreenToggle: ((Boolean) -> Unit)? = null,
+    onPlaybackError: ((String) -> Unit)? = null
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    val currentPlaybackError by rememberUpdatedState(onPlaybackError)
 
     val exoPlayer = remember(context) {
         ExoPlayer.Builder(context).build().apply {
             playWhenReady = true
+        }
+    }
+
+    DisposableEffect(exoPlayer) {
+        val listener = object : Player.Listener {
+            override fun onPlayerError(error: PlaybackException) {
+                currentPlaybackError?.invoke(
+                    error.localizedMessage ?: "Native playback failed (${error.errorCodeName})"
+                )
+            }
+        }
+        exoPlayer.addListener(listener)
+        onDispose {
+            exoPlayer.removeListener(listener)
         }
     }
 

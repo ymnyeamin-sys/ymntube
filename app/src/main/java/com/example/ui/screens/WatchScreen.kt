@@ -29,6 +29,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.Bookmark
 import androidx.compose.material.icons.rounded.BookmarkBorder
 import androidx.compose.material.icons.rounded.CheckCircle
@@ -42,11 +43,15 @@ import androidx.compose.material.icons.rounded.Hd
 import androidx.compose.material.icons.rounded.OfflinePin
 import androidx.compose.material.icons.rounded.PermMedia
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Share
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
@@ -65,8 +70,10 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.net.toUri
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import com.example.R
@@ -146,31 +153,117 @@ fun WatchScreen(
                         ExoVideoPlayer(
                             mediaUriOrPath = path,
                             modifier = Modifier.fillMaxSize(),
-                            onFullscreenToggle = { isFullscreen = it }
+                            onFullscreenToggle = { isFullscreen = it },
+                            onPlaybackError = { viewModel.onNativePlaybackError(it) }
                         )
                     } else {
                         YouTubeWebPlayer(
                             videoId = state.video.id,
                             modifier = Modifier.fillMaxSize(),
-                            onSwitchToNativePlayer = { viewModel.tryNativeExoStream() }
+                            onSwitchToNativePlayer = { viewModel.tryNativeExoStream() },
+                            onEmbedError = { code -> viewModel.onWebPlayerError(code) }
                         )
                     }
                 }
 
                 PlayerMode.EXO_NATIVE_STREAM -> {
                     val streamUrl = state.directStreamUrl
-                    if (!streamUrl.isNullOrBlank()) {
-                        ExoVideoPlayer(
-                            mediaUriOrPath = streamUrl,
-                            modifier = Modifier.fillMaxSize(),
-                            onFullscreenToggle = { isFullscreen = it }
-                        )
-                    } else {
-                        YouTubeWebPlayer(
-                            videoId = state.video.id,
-                            modifier = Modifier.fillMaxSize(),
-                            onSwitchToNativePlayer = { viewModel.tryNativeExoStream() }
-                        )
+                    when {
+                        !streamUrl.isNullOrBlank() -> {
+                            ExoVideoPlayer(
+                                mediaUriOrPath = streamUrl,
+                                modifier = Modifier.fillMaxSize(),
+                                onFullscreenToggle = { isFullscreen = it },
+                                onPlaybackError = { viewModel.onNativePlaybackError(it) }
+                            )
+                        }
+                        state.isResolvingStream -> {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .background(Color.Black),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    CircularProgressIndicator(
+                                        color = CrimsonAccent,
+                                        modifier = Modifier.size(32.dp),
+                                        strokeWidth = 3.dp
+                                    )
+                                    Text(
+                                        text = "Loading HD stream…",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = TextSecondary
+                                    )
+                                }
+                            }
+                        }
+                        else -> {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .background(Color.Black)
+                                    .padding(20.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    Text(
+                                        text = state.streamErrorMessage ?: "Unable to stream inside app",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = TextPrimary,
+                                        textAlign = TextAlign.Center,
+                                        maxLines = 3,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                        Button(
+                                            onClick = { viewModel.tryNativeExoStream() },
+                                            colors = ButtonDefaults.buttonColors(
+                                                containerColor = CrimsonAccent,
+                                                contentColor = TextPrimary
+                                            ),
+                                            shape = RoundedCornerShape(10.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.Refresh,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text("Retry Stream")
+                                        }
+                                        OutlinedButton(
+                                            onClick = {
+                                                val watchIntent = Intent(
+                                                    Intent.ACTION_VIEW,
+                                                    "https://www.youtube.com/watch?v=${state.video.id}".toUri()
+                                                )
+                                                runCatching { context.startActivity(watchIntent) }
+                                            },
+                                            colors = ButtonDefaults.outlinedButtonColors(
+                                                containerColor = SurfaceLevel2,
+                                                contentColor = CyanElectric
+                                            ),
+                                            shape = RoundedCornerShape(10.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.AutoMirrored.Rounded.OpenInNew,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text("Open YouTube")
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -178,7 +271,8 @@ fun WatchScreen(
                     YouTubeWebPlayer(
                         videoId = state.video.id,
                         modifier = Modifier.fillMaxSize(),
-                        onSwitchToNativePlayer = { viewModel.tryNativeExoStream() }
+                        onSwitchToNativePlayer = { viewModel.tryNativeExoStream() },
+                        onEmbedError = { code -> viewModel.onWebPlayerError(code) }
                     )
                 }
             }

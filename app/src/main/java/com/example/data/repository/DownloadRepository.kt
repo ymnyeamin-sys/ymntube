@@ -79,11 +79,49 @@ internal data class ParsedResolutionOption(
 )
 
 internal object DownloaderResponseParser {
-    private val heightPRegex = Regex("(\\d{3,4})p", RegexOption.IGNORE_CASE)
-    private val wxhRegex = Regex("\\d{3,4}x(\\d{3,4})", RegexOption.IGNORE_CASE)
+    private val pureDigitsRegex = Regex("^(\\d+)$")
+    private val heightPRegex = Regex("(\\d{2,4})p", RegexOption.IGNORE_CASE)
+    private val wxhRegex = Regex("\\d{2,4}x(\\d{2,4})", RegexOption.IGNORE_CASE)
+
+    fun extractHeight(quality: String): Int? {
+        val trimmed = quality.trim()
+        pureDigitsRegex.find(trimmed)?.groupValues?.getOrNull(1)?.toIntOrNull()?.let { return it }
+        heightPRegex.find(trimmed)?.groupValues?.getOrNull(1)?.toIntOrNull()?.let { return it }
+        wxhRegex.find(trimmed)?.groupValues?.getOrNull(1)?.toIntOrNull()?.let { return it }
+        return null
+    }
+
+    fun formatDisplayQuality(raw: String): String {
+        val trimmed = raw.trim()
+        return if (pureDigitsRegex.matches(trimmed)) "${trimmed}p" else trimmed
+    }
+
+    fun buildQualityCandidates(quality: String, rawFormatId: String? = null): List<String> {
+        val trimmed = quality.trim()
+        val height = extractHeight(trimmed)
+        return buildList {
+            if (trimmed.isNotEmpty()) add(trimmed)
+            if (height != null) {
+                add(height.toString())
+                add("${height}p")
+            }
+            if (!rawFormatId.isNullOrBlank()) {
+                add(rawFormatId.trim())
+            }
+        }.distinct()
+    }
 
     fun parseAvailableResolutions(rawJson: String): Pair<List<ParsedResolutionOption>, String?> {
-        val json = runCatching { JSONObject(rawJson) }.getOrNull()
+        val trimmedJson = rawJson.trim()
+        if (trimmedJson.startsWith("[")) {
+            val arr = runCatching { JSONArray(trimmedJson) }.getOrNull()
+                ?: return emptyList<ParsedResolutionOption>() to "Downloader API returned invalid JSON array."
+            val collected = mutableListOf<ParsedResolutionOption>()
+            extractOptionsFromArray(arr, collected)
+            return collected.distinctBy { it.requestQuality.lowercase() } to null
+        }
+
+        val json = runCatching { JSONObject(trimmedJson) }.getOrNull()
             ?: return emptyList<ParsedResolutionOption>() to "Downloader API returned invalid JSON."
 
         val err = json.optString("error").takeIf { it.isNotBlank() && it != "null" }
@@ -91,8 +129,8 @@ internal object DownloaderResponseParser {
             ?: json.optString("detail").takeIf { it.isNotBlank() && it != "null" }
 
         val candidateArrays = listOfNotNull(
-            json.optJSONArray("all"),
             json.optJSONArray("resolutions"),
+            json.optJSONArray("all"),
             json.optJSONArray("progressive"),
             json.optJSONArray("formats")
         )
@@ -113,13 +151,13 @@ internal object DownloaderResponseParser {
             when (item) {
                 is String -> {
                     val trimmed = item.trim()
-                    if (trimmed.isNotEmpty()) {
+                    if (trimmed.isNotEmpty() && !trimmed.equals("highest", ignoreCase = true)) {
                         val isAudio = isAudioLabel(trimmed)
                         val reqQuality = normalizeRequestQuality(trimmed, null)
                         out.add(
                             ParsedResolutionOption(
                                 requestQuality = reqQuality,
-                                displayLabel = trimmed,
+                                displayLabel = formatDisplayQuality(trimmed),
                                 ext = if (isAudio) "m4a" else "mp4",
                                 isAudioOnly = isAudio
                             )
@@ -129,8 +167,13 @@ internal object DownloaderResponseParser {
                 is Number -> {
                     val h = item.toInt()
                     if (h > 0) {
-                        val q = "${h}p"
-                        out.add(ParsedResolutionOption(requestQuality = q, displayLabel = q))
+                        val raw = h.toString()
+                        out.add(
+                            ParsedResolutionOption(
+                                requestQuality = raw,
+                                displayLabel = "${h}p"
+                            )
+                        )
                     }
                 }
                 is JSONObject -> {
@@ -139,7 +182,7 @@ internal object DownloaderResponseParser {
                         ?: item.optString("label").takeIf { it.isNotBlank() && it != "null" }
                         ?: item.optString("resolution").takeIf { it.isNotBlank() && it != "null" }
                         ?: item.optString("format_note").takeIf { it.isNotBlank() && it != "null" }
-                        ?: heightVal?.let { "${it}p" }
+                        ?: heightVal?.toString()
 
                     if (!rawText.isNullOrBlank()) {
                         val ext = item.optString("ext").takeIf { it.isNotBlank() && it != "null" }
@@ -169,10 +212,11 @@ internal object DownloaderResponseParser {
                         val isAudio = isAudioLabel(rawText) ||
                             item.optString("vcodec").equals("none", ignoreCase = true)
                         val reqQuality = normalizeRequestQuality(rawText, heightVal)
-                        val display = if (heightVal != null && !rawText.contains("${heightVal}p", ignoreCase = true)) {
-                            "${heightVal}p"
+                        val resolvedHeight = heightVal ?: extractHeight(rawText)
+                        val display = if (resolvedHeight != null && !isAudio) {
+                            "${resolvedHeight}p"
                         } else {
-                            reqQuality
+                            formatDisplayQuality(rawText)
                         }
                         out.add(
                             ParsedResolutionOption(
@@ -192,16 +236,21 @@ internal object DownloaderResponseParser {
     }
 
     private fun normalizeRequestQuality(rawText: String, height: Int?): String {
+        val trimmed = rawText.trim()
+        if (pureDigitsRegex.matches(trimmed)) {
+            return trimmed
+        }
         if (height != null && height > 0) {
-            return "${height}p"
+            return height.toString()
         }
-        heightPRegex.find(rawText)?.groupValues?.getOrNull(1)?.let { digits ->
-            return "${digits}p"
+        heightPRegex.find(trimmed)?.groupValues?.getOrNull(1)?.let { digits ->
+            // Preserve raw if it already ends cleanly with p (e.g. "720p"), else extract digits
+            return if (trimmed.equals("${digits}p", ignoreCase = true)) trimmed else digits
         }
-        wxhRegex.find(rawText)?.groupValues?.getOrNull(1)?.let { hDigits ->
-            return "${hDigits}p"
+        wxhRegex.find(trimmed)?.groupValues?.getOrNull(1)?.let { hDigits ->
+            return hDigits
         }
-        return rawText.trim().replace("/", "-").trim()
+        return trimmed.replace("/", "-").trim()
     }
 
     private fun isAudioLabel(label: String): Boolean {
@@ -393,52 +442,157 @@ class DownloadRepository(
         }
     }
 
-    suspend fun resolvePlayableStreamUrl(videoId: String): ApiResult<String> {
+    private suspend fun executeDownloadApiRequest(
+        baseUrl: String,
+        watchUrl: String,
+        primaryQuality: String,
+        rawFormatId: String? = null
+    ): retrofit2.Response<okhttp3.ResponseBody> {
+        val candidates = DownloaderResponseParser.buildQualityCandidates(primaryQuality, rawFormatId)
+        val body = UrlRequestBody(url = watchUrl)
+        var lastResp: retrofit2.Response<okhttp3.ResponseBody>? = null
+
+        for (candidate in candidates) {
+            val encoded = Uri.encode(candidate)
+            val resp = downloaderApi.requestDownload("$baseUrl/download/$encoded", body)
+            lastResp = resp
+            if (resp.code() != 404) return resp
+        }
+
+        for (candidate in candidates) {
+            val resp = runCatching {
+                downloaderApi.requestDownloadWithBodyQuality(
+                    fullUrl = "$baseUrl/download",
+                    body = DownloadWithQualityBody(url = watchUrl, quality = candidate)
+                )
+            }.getOrNull()
+            if (resp != null) {
+                lastResp = resp
+                if (resp.code() != 404) return resp
+            }
+        }
+
+        val snakeRoutes = listOf("$baseUrl/download_video", "$baseUrl/download_mp4")
+        for (route in snakeRoutes) {
+            val resp = runCatching {
+                downloaderApi.requestDownloadWithBodyQuality(
+                    fullUrl = route,
+                    body = DownloadWithQualityBody(url = watchUrl, quality = primaryQuality)
+                )
+            }.getOrNull()
+            if (resp != null) {
+                lastResp = resp
+                if (resp.code() != 404) return resp
+            }
+        }
+
+        for (candidate in candidates) {
+            val encoded = Uri.encode(candidate)
+            val resp = runCatching {
+                downloaderApi.requestDownloadGet(
+                    "$baseUrl/download/$encoded?url=${Uri.encode(watchUrl)}"
+                )
+            }.getOrNull()
+            if (resp != null) {
+                lastResp = resp
+                if (resp.code() != 404) return resp
+            }
+        }
+
+        return lastResp!!
+    }
+
+    suspend fun resolvePlayableStreamUrl(videoId: String): ApiResult<String> = withContext(Dispatchers.IO) {
         val baseUrl = preferencesRepository.preferencesFlow.first().downloadApiBaseUrl
         val watchUrl = "https://www.youtube.com/watch?v=$videoId"
-        return try {
+        return@withContext try {
             val resResp = downloaderApi.getAvailableResolutions(
                 "$baseUrl/available_resolutions",
                 UrlRequestBody(watchUrl)
             )
             if (!resResp.isSuccessful) {
-                return ApiResult.Error("Resolution lookup failed (${resResp.code()})")
+                return@withContext ApiResult.Error("Resolution lookup failed (${resResp.code()})")
             }
             val rawResJson = resResp.body()?.string().orEmpty()
             val (options, _) = DownloaderResponseParser.parseAvailableResolutions(rawResJson)
-            val chosen = options.firstOrNull { it.requestQuality.contains("720") }
-                ?: options.firstOrNull { it.requestQuality.contains("360") }
-                ?: options.lastOrNull { !it.isAudioOnly }
-                ?: return ApiResult.Error("No playable resolution available")
+            val videoOptions = options.filter { !it.isAudioOnly }
+            val chosen = videoOptions.firstOrNull {
+                DownloaderResponseParser.extractHeight(it.requestQuality) == 720
+            } ?: videoOptions.firstOrNull {
+                DownloaderResponseParser.extractHeight(it.requestQuality) == 480
+            } ?: videoOptions.firstOrNull {
+                DownloaderResponseParser.extractHeight(it.requestQuality) == 360
+            } ?: videoOptions.firstOrNull {
+                DownloaderResponseParser.extractHeight(it.requestQuality) == 1080
+            } ?: videoOptions.lastOrNull()
+                ?: options.lastOrNull()
+                ?: return@withContext ApiResult.Error("No playable resolution available")
 
             if (!chosen.directUrl.isNullOrBlank()) {
-                return ApiResult.Success(chosen.directUrl)
+                return@withContext ApiResult.Success(resolveUrlAgainstBase(baseUrl, chosen.directUrl))
             }
 
-            val encodedQuality = Uri.encode(chosen.requestQuality)
-            var dlResp = downloaderApi.requestDownload(
-                "$baseUrl/download/$encodedQuality",
-                UrlRequestBody(watchUrl)
+            val dlResp = executeDownloadApiRequest(
+                baseUrl = baseUrl,
+                watchUrl = watchUrl,
+                primaryQuality = chosen.requestQuality,
+                rawFormatId = chosen.rawFormatId
             )
-            if (dlResp.code() == 404) {
-                dlResp = downloaderApi.requestDownloadWithBodyQuality(
-                    "$baseUrl/download",
-                    DownloadWithQualityBody(url = watchUrl, quality = chosen.requestQuality)
+            if (!dlResp.isSuccessful) {
+                val errText = parseErrorBody(dlResp.errorBody()?.string())
+                return@withContext ApiResult.Error(
+                    errText ?: "Stream lookup failed (HTTP ${dlResp.code()})"
                 )
             }
-            if (!dlResp.isSuccessful) {
-                return ApiResult.Error("Stream lookup failed (${dlResp.code()})")
+
+            val respBody = dlResp.body()
+                ?: return@withContext ApiResult.Error("Empty stream response")
+            val contentType = respBody.contentType()?.toString()?.lowercase().orEmpty()
+            val isJson = contentType.contains("json")
+
+            if (!isJson && (contentType.startsWith("video/") ||
+                    contentType.startsWith("audio/") ||
+                    contentType.contains("application/octet-stream"))
+            ) {
+                val streamFile = cacheBinaryStreamForPlayback(videoId, respBody.byteStream())
+                return@withContext ApiResult.Success(streamFile.absolutePath)
             }
-            val bodyStr = dlResp.body()?.string().orEmpty()
+
+            val rawBytes = respBody.bytes()
+            val bodyStr = rawBytes.toString(Charsets.UTF_8)
             val parsed = DownloaderResponseParser.parseDownloadResponse(bodyStr)
-                ?: return ApiResult.Error("Server returned binary stream instead of JSON stream URL")
+            if (parsed == null) {
+                if (rawBytes.isNotEmpty()) {
+                    val streamFile = File(context.cacheDir, "velotube_stream_${videoId}.mp4")
+                    streamFile.writeBytes(rawBytes)
+                    return@withContext ApiResult.Success(streamFile.absolutePath)
+                }
+                return@withContext ApiResult.Error("Invalid response from stream endpoint")
+            }
+
             val rawUrl = parsed.downloadUrl
-                ?: return ApiResult.Error(parsed.error ?: parsed.message ?: "No download_url returned")
+                ?: return@withContext ApiResult.Error(parsed.error ?: parsed.message ?: "No download_url returned")
             val resolved = resolveUrlAgainstBase(baseUrl, rawUrl)
             ApiResult.Success(resolved)
         } catch (e: Exception) {
             ApiResult.Error(e.localizedMessage ?: "Failed to resolve HD stream")
         }
+    }
+
+    private fun cacheBinaryStreamForPlayback(videoId: String, inputStream: InputStream): File {
+        val cutoff = System.currentTimeMillis() - 2 * 60 * 60 * 1000L
+        context.cacheDir.listFiles()?.forEach { file ->
+            if (file.name.startsWith("velotube_stream_") && file.lastModified() < cutoff) {
+                file.delete()
+            }
+        }
+        val streamFile = File(context.cacheDir, "velotube_stream_${videoId}.mp4")
+        inputStream.use { input ->
+            FileOutputStream(streamFile).use { output ->
+                input.copyTo(output)
+            }
+        }
+        return streamFile
     }
 
     fun startDownload(
@@ -480,65 +634,12 @@ class DownloadRepository(
                 val targetFile = File(appMoviesDir, fileName)
 
                 val watchUrl = "https://www.youtube.com/watch?v=${video.id}"
-                val encodedQuality = Uri.encode(format.formatId)
-                val endpoint = "$baseUrl/download/$encodedQuality"
-
-                var apiResp = downloaderApi.requestDownload(
-                    fullUrl = endpoint,
-                    body = UrlRequestBody(url = watchUrl)
+                val apiResp = executeDownloadApiRequest(
+                    baseUrl = baseUrl,
+                    watchUrl = watchUrl,
+                    primaryQuality = format.formatId,
+                    rawFormatId = format.rawFormatId
                 )
-
-                // Try compatible fallback routes if /download/{quality} returns 404
-                if (apiResp.code() == 404) {
-                    val bodyFallback = downloaderApi.requestDownloadWithBodyQuality(
-                        fullUrl = "$baseUrl/download",
-                        body = DownloadWithQualityBody(url = watchUrl, quality = format.formatId)
-                    )
-                    if (bodyFallback.code() != 404) {
-                        apiResp = bodyFallback
-                    }
-                }
-
-                if (apiResp.code() == 404 && !format.rawFormatId.isNullOrBlank()) {
-                    val fmtEndpoint = "$baseUrl/download/${Uri.encode(format.rawFormatId)}"
-                    val fmtFallback = downloaderApi.requestDownload(
-                        fullUrl = fmtEndpoint,
-                        body = UrlRequestBody(url = watchUrl)
-                    )
-                    if (fmtFallback.code() != 404) {
-                        apiResp = fmtFallback
-                    }
-                }
-
-                if (apiResp.code() == 404) {
-                    val snakeRoutes = listOf(
-                        "$baseUrl/download_video",
-                        "$baseUrl/download_mp4"
-                    )
-                    for (route in snakeRoutes) {
-                        val resp = runCatching {
-                            downloaderApi.requestDownloadWithBodyQuality(
-                                fullUrl = route,
-                                body = DownloadWithQualityBody(url = watchUrl, quality = format.formatId)
-                            )
-                        }.getOrNull()
-                        if (resp != null && resp.code() != 404) {
-                            apiResp = resp
-                            break
-                        }
-                    }
-                }
-
-                if (apiResp.code() == 404) {
-                    val getResp = runCatching {
-                        downloaderApi.requestDownloadGet(
-                            "$baseUrl/download/$encodedQuality?url=${Uri.encode(watchUrl)}"
-                        )
-                    }.getOrNull()
-                    if (getResp != null && getResp.code() != 404) {
-                        apiResp = getResp
-                    }
-                }
 
                 if (apiResp.code() == 404 && format.url != watchUrl && format.url.startsWith("http")) {
                     // Direct stream URL was included inside progressive/resolutions object
@@ -556,19 +657,21 @@ class DownloadRepository(
                         ?: "Download API failed (HTTP ${apiResp.code()})"
                     if (apiResp.code() == 404) {
                         throw IllegalStateException(
-                            "$errText at $baseUrl/download/${format.formatId} — verify /download/{quality} is deployed on your server"
+                            "$errText at $baseUrl/download/${format.formatId}"
                         )
                     }
-                    throw IllegalStateException("$errText (${format.formatId})")
+                    throw IllegalStateException("$errText (${format.qualityLabel})")
                 }
 
                 val respBody = apiResp.body()
                     ?: throw IllegalStateException("Empty response from download API")
 
                 val contentType = respBody.contentType()?.toString()?.lowercase().orEmpty()
-                val isVideoBinary = contentType.startsWith("video/") ||
-                    contentType.startsWith("audio/") ||
-                    contentType.contains("application/octet-stream")
+                val isVideoBinary = !contentType.contains("json") && (
+                    contentType.startsWith("video/") ||
+                        contentType.startsWith("audio/") ||
+                        contentType.contains("application/octet-stream")
+                    )
 
                 if (isVideoBinary) {
                     val totalLen = respBody.contentLength()
@@ -596,12 +699,11 @@ class DownloadRepository(
                         throw IllegalStateException(parsed.error ?: parsed.message)
                     }
 
-                    val expectedHeight = Regex("(\\d{3,4})p").find(format.formatId)
-                        ?.groupValues?.getOrNull(1)?.toIntOrNull()
+                    val expectedHeight = DownloaderResponseParser.extractHeight(format.formatId)
                     val returnedHeight = parsed.selected?.height
                     if (expectedHeight != null && returnedHeight != null && returnedHeight != expectedHeight) {
                         throw IllegalStateException(
-                            "Requested ${format.formatId} but server returned ${returnedHeight}p. Aborted to prevent wrong quality."
+                            "Requested ${format.qualityLabel} but server returned ${returnedHeight}p. Aborted to prevent wrong quality."
                         )
                     }
 
