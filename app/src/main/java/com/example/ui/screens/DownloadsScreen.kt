@@ -212,7 +212,7 @@ fun DownloadsScreen(
                     color = TextPrimary
                 )
             }
-            items(activeList, key = { it.downloadId }) { job ->
+            items(activeList, key = { "active_${it.downloadId}" }) { job ->
                 ActiveDownloadCard(
                     job = job,
                     onCancel = { downloadViewModel.cancelDownload(job.downloadId) },
@@ -281,7 +281,7 @@ fun DownloadsScreen(
                 }
             }
         } else {
-            items(downloadedList, key = { it.downloadId }) { entity ->
+            items(downloadedList, key = { "vault_${it.downloadId}" }) { entity ->
                 DownloadedVaultCard(
                     entity = entity,
                     onPlayOffline = { onPlayOffline(entity) },
@@ -375,8 +375,9 @@ private fun ActiveDownloadCard(
                 if ((job.status == DownloadJobStatus.DOWNLOADING && job.totalBytes > 0) ||
                     job.status == DownloadJobStatus.EXPORTING_GALLERY
                 ) {
+                    val safeProgress = if (job.progress.isFinite()) job.progress.coerceIn(0f, 1f) else 0f
                     LinearProgressIndicator(
-                        progress = { job.progress },
+                        progress = { safeProgress },
                         color = CrimsonAccent,
                         trackColor = SurfaceLevel2,
                         modifier = Modifier

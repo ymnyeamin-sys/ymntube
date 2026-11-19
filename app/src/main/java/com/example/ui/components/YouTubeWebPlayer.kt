@@ -288,7 +288,7 @@ fun YouTubeWebPlayer(
                             function onYouTubeIframeAPIReady() {
                               try {
                                 new YT.Player('ytplayer', {
-                                  host: 'https://www.youtube-nocookie.com',
+                                  host: 'https://www.youtube.com',
                                   width: '100%',
                                   height: '100%',
                                   videoId: '$safeId',
@@ -298,7 +298,8 @@ fun YouTubeWebPlayer(
                                     playsinline: 1,
                                     rel: 0,
                                     iv_load_policy: 3,
-                                    origin: 'https://www.youtube-nocookie.com'
+                                    origin: 'https://www.youtube.com',
+                                    widget_referrer: 'https://www.youtube.com/'
                                   },
                                   events: {
                                     onReady: function(e) {
@@ -323,11 +324,11 @@ fun YouTubeWebPlayer(
                         </html>
                     """.trimIndent()
                     view.loadDataWithBaseURL(
-                        "https://www.youtube-nocookie.com/",
+                        "https://www.youtube.com/",
                         html,
                         "text/html",
                         "utf-8",
-                        "https://www.youtube-nocookie.com/"
+                        "https://www.youtube.com/"
                     )
                 }
             }

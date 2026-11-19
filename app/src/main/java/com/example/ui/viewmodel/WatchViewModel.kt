@@ -75,18 +75,9 @@ class WatchViewModel(
                 val preferredMatch = current.offlineDownload?.let { prev ->
                     variants.firstOrNull { it.downloadId == prev.downloadId }
                 } ?: variants.firstOrNull()
-                val nextMode = if (preferredMatch != null &&
-                    current.playerMode == PlayerMode.YOUTUBE_EMBED &&
-                    current.directStreamUrl == null
-                ) {
-                    PlayerMode.OFFLINE_VAULT
-                } else {
-                    current.playerMode
-                }
                 _uiState.value = current.copy(
                     offlineDownload = preferredMatch,
-                    offlineVariants = variants,
-                    playerMode = nextMode
+                    offlineVariants = variants
                 )
             }
         }
@@ -97,13 +88,21 @@ class WatchViewModel(
             _uiState.value = _uiState.value.copy(isLoadingDetails = true, errorMessage = null)
             val saved = youTubeRepository.isVideoInWatchlist(videoId)
             val variants = downloadRepository.getDownloadedVideosForVideo(videoId)
-            val local = variants.firstOrNull()
+            val local = variants.firstOrNull {
+                val f = java.io.File(it.localFilePath)
+                f.exists() && f.length() > 0L
+            } ?: variants.firstOrNull()
 
-            if (local != null) {
+            if (local != null && java.io.File(local.localFilePath).let { it.exists() && it.length() > 0L }) {
                 _uiState.value = _uiState.value.copy(
                     offlineDownload = local,
                     offlineVariants = variants,
                     playerMode = PlayerMode.OFFLINE_VAULT
+                )
+            } else {
+                _uiState.value = _uiState.value.copy(
+                    offlineDownload = local,
+                    offlineVariants = variants
                 )
             }
 

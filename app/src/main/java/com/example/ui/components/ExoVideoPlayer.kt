@@ -167,38 +167,68 @@ fun ExoVideoPlayer(
         }.coerceAtLeast(0)
     }
 
-    // Connect to MediaSessionService so audio/video keeps playing cleanly when screen is locked
-    DisposableEffect(context) {
+    // Connect to MediaSessionService only while lifecycle >= STARTED & background play enabled
+    DisposableEffect(context, lifecycleOwner, backgroundPlayEnabled) {
         var released = false
         var localFallback: ExoPlayer? = null
-        val sessionToken = SessionToken(context, ComponentName(context, PlaybackService::class.java))
-        val controllerFuture = MediaController.Builder(context, sessionToken).buildAsync()
+        var controllerFuture: com.google.common.util.concurrent.ListenableFuture<MediaController>? = null
+        var startObserver: LifecycleEventObserver? = null
 
-        controllerFuture.addListener(
-            {
-                if (released) return@addListener
-                val controller = runCatching { controllerFuture.get() }.getOrNull()
-                if (controller != null) {
-                    isControllerOwned = true
-                    activePlayer = controller
-                } else {
-                    isControllerOwned = false
-                    localFallback = ExoPlayer.Builder(context).build().also {
-                        activePlayer = it
-                    }
+        fun initLocalPlayer() {
+            if (released || activePlayer != null) return
+            isControllerOwned = false
+            localFallback = runCatching { ExoPlayer.Builder(context).build() }.getOrNull()?.also {
+                activePlayer = it
+            }
+        }
+
+        fun connectSessionController() {
+            if (released || controllerFuture != null) return
+            runCatching {
+                val sessionToken = SessionToken(context, ComponentName(context, PlaybackService::class.java))
+                val future = MediaController.Builder(context, sessionToken).buildAsync()
+                controllerFuture = future
+                future.addListener(
+                    {
+                        if (released) return@addListener
+                        val controller = runCatching { future.get() }.getOrNull()
+                        if (controller != null) {
+                            isControllerOwned = true
+                            activePlayer = controller
+                        } else {
+                            initLocalPlayer()
+                        }
+                    },
+                    ContextCompat.getMainExecutor(context)
+                )
+            }.onFailure {
+                initLocalPlayer()
+            }
+        }
+
+        if (!backgroundPlayEnabled) {
+            initLocalPlayer()
+        } else if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+            connectSessionController()
+        } else {
+            val observer = LifecycleEventObserver { _, event ->
+                if (!released && (event == Lifecycle.Event.ON_START || event == Lifecycle.Event.ON_RESUME)) {
+                    connectSessionController()
                 }
-            },
-            ContextCompat.getMainExecutor(context)
-        )
+            }
+            startObserver = observer
+            lifecycleOwner.lifecycle.addObserver(observer)
+        }
 
         onDispose {
             released = true
+            startObserver?.let { lifecycleOwner.lifecycle.removeObserver(it) }
             val p = activePlayer
             if (p != null && !latestBackgroundPlay) {
                 runCatching { p.pause() }
             }
-            MediaController.releaseFuture(controllerFuture)
-            localFallback?.release()
+            controllerFuture?.let { MediaController.releaseFuture(it) }
+            runCatching { localFallback?.release() }
             activePlayer = null
         }
     }

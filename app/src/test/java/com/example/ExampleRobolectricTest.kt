@@ -2,7 +2,11 @@ package com.example
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import com.example.data.local.SearchHistoryEntity
+import com.example.data.local.WatchHistoryEntity
+import com.example.data.model.VideoItem
 import com.example.data.repository.DownloaderResponseParser
+import com.example.data.repository.HomeSuggestionEngine
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -98,7 +102,7 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun `parseAppUpdateInfo parses enabled version code and url`() {
+    fun `parseAppUpdateInfo parses enabled version code, string booleans, and gist API`() {
         val enabledJson = """
             {
               "update_enabled": true,
@@ -116,8 +120,68 @@ class ExampleRobolectricTest {
         assertEquals("https://example.com/ymntube-v1.1.0.apk", enabled?.updateUrl)
         assertEquals("New YmnTube Update", enabled?.title)
 
+        val flexibleJson = """{"update_on": "on", "version": "v1.0.1", "downloadUrl": "https://example.com/release"}"""
+        val flex = DownloaderResponseParser.parseAppUpdateInfo(flexibleJson)
+        assertTrue(flex?.updateEnabled == true)
+        assertTrue(DownloaderResponseParser.isVersionNewer(flex!!.version, flex.versionCode, "1.0", 1))
+        assertFalse(DownloaderResponseParser.isVersionNewer("v1.0", 1, "1.0", 1))
+
         val disabledJson = """{"update_enabled": false, "version": "1.1.0", "update_url": "https://example.com/app"}"""
         val disabled = DownloaderResponseParser.parseAppUpdateInfo(disabledJson)
         assertFalse(disabled?.updateEnabled ?: true)
+
+        val gistPayload = """
+            {
+              "files": {
+                "update.json": {
+                  "content": "{\"update_enabled\":true,\"version\":\"1.2.0\",\"version_code\":3,\"update_url\":\"https://example.com/app.apk\"}"
+                }
+              }
+            }
+        """.trimIndent()
+        val extracted = DownloaderResponseParser.extractGistFileContent(gistPayload, "update.json")
+        val fromGist = DownloaderResponseParser.parseAppUpdateInfo(extracted.orEmpty())
+        assertEquals("1.2.0", fromGist?.version)
+        assertEquals(3, fromGist?.versionCode)
+    }
+
+    @Test
+    fun `HomeSuggestionEngine collapses near-duplicate titles and diversifies overall taste`() {
+        val watches = listOf(
+            WatchHistoryEntity("v1", "Eto Prem Eto Maya (Full Song) | Mon Dilona", "c1", "Channel A", "", "", 0L, "", 100L),
+            WatchHistoryEntity("v2", "Samsung Galaxy S26 Unboxing & Full Review Bangla", "c2", "TechBD", "", "", 0L, "", 90L)
+        )
+        val searches = listOf(SearchHistoryEntity("eto prem eto maya song", 100L))
+
+        val queries = HomeSuggestionEngine.buildDiverseTasteQueries(
+            searches = searches,
+            watches = watches,
+            saved = emptyList(),
+            regionCode = "BD"
+        )
+        assertTrue(queries.size >= 2)
+        assertTrue(queries.none { it.equals("Eto Prem Eto Maya Full Song", ignoreCase = true) })
+
+        val dupBucket = listOf(
+            VideoItem("a1", "Eto Prem Eto Maya (Full Song) | Official Video", "", "c1", "Ch1", null, "", ""),
+            VideoItem("a2", "Eto Prem Eto Maya Full Song Lyrics HD", "", "c3", "Ch3", null, "", ""),
+            VideoItem("a3", "Eto Prem Eto Maya (Full Song) Cover Version", "", "c4", "Ch4", null, "", "")
+        )
+        val freshBucket = listOf(
+            VideoItem("b1", "Tumi Robe Nirobe New Bangla Song", "", "c5", "Ch5", null, "", ""),
+            VideoItem("b2", "Best Budget Phones in Bangladesh 2026", "", "c2", "TechBD", null, "", ""),
+            VideoItem("b3", "Dhaka Street Food Tour", "", "c6", "Foodie", null, "", "")
+        )
+        val ranked = HomeSuggestionEngine.rankAndDiversify(
+            buckets = listOf(dupBucket, freshBucket),
+            watchedIds = emptySet(),
+            preferredChannels = setOf("techbd"),
+            limit = 20
+        )
+        // Strict title dedupe collapses a1, a2, a3 into 1 distinct song title (or pads only if needed)
+        val etoPremCount = ranked.take(4).count { it.title.contains("Eto Prem Eto Maya") }
+        assertEquals(1, etoPremCount)
+        assertTrue(ranked.any { it.id == "b1" })
+        assertTrue(ranked.any { it.id == "b2" })
     }
 }

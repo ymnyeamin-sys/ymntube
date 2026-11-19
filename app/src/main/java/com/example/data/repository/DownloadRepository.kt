@@ -13,9 +13,13 @@ import android.provider.MediaStore
 import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
 import com.example.BuildConfig
+import com.example.data.local.APP_UPDATE_GIST_API_URL
 import com.example.data.local.DownloadedVideoEntity
 import com.example.data.local.FIXED_APP_UPDATE_URL
 import com.example.data.local.FIXED_REMOTE_CONFIG_URL
+import com.example.data.local.PINNED_APP_UPDATE_URL
+import com.example.data.local.PINNED_REMOTE_CONFIG_URL
+import com.example.data.local.REMOTE_CONFIG_GIST_API_URL
 import com.example.data.local.UserPreferencesRepository
 import com.example.data.local.VeloTubeDao
 import com.example.data.model.ActiveDownload
@@ -49,8 +53,10 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.ResponseBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStream
@@ -62,6 +68,13 @@ data class ResolvedDownloadPackage(
     val video: VideoItem,
     val formats: List<DownloadFormat>
 )
+
+sealed interface AppUpdateCheckResult {
+    data class Available(val info: AppUpdateInfo) : AppUpdateCheckResult
+    data class Disabled(val version: String) : AppUpdateCheckResult
+    data class UpToDate(val installedVersion: String, val remoteVersion: String) : AppUpdateCheckResult
+    data class Error(val message: String) : AppUpdateCheckResult
+}
 
 internal data class ParsedVideoInfo(
     val title: String? = null,
@@ -315,44 +328,173 @@ internal object DownloaderResponseParser {
     }
 
     fun parseAppUpdateInfo(rawJson: String): AppUpdateInfo? {
-        val json = runCatching { JSONObject(rawJson) }.getOrNull() ?: return null
-        val enabled = when {
-            json.has("update_enabled") -> json.optBoolean("update_enabled", false)
-            json.has("enabled") -> json.optBoolean("enabled", false)
-            json.has("update") -> json.optBoolean("update", false)
-            json.has("is_update_available") -> json.optBoolean("is_update_available", false)
-            json.has("active") -> json.optBoolean("active", false)
-            else -> false
+        val trimmed = rawJson.trim().removePrefix("\uFEFF")
+        val json = runCatching { JSONObject(trimmed) }.getOrNull() ?: return null
+
+        val enabled = parseFlexibleBoolean(
+            json,
+            "update_enabled",
+            "updateEnabled",
+            "update_on",
+            "updateOn",
+            "is_update_available",
+            "isUpdateAvailable",
+            "is_update",
+            "enabled",
+            "update",
+            "active",
+            "status"
+        )
+
+        val versionCode = listOf("version_code", "versionCode", "build", "build_number")
+            .firstNotNullOfOrNull { key ->
+                if (json.has(key)) parseFlexibleLong(json.opt(key))?.toInt() else null
+            } ?: 0
+
+        val rawVersion = listOf("version", "latest_version", "latestVersion", "version_name", "versionName", "app_version")
+            .firstNotNullOfOrNull { key ->
+                json.optString(key).trim().takeIf { it.isNotBlank() && it != "null" }
+            }
+            ?: if (versionCode > 0) "v$versionCode" else ""
+
+        val rawUpdateUrl = listOf(
+            "update_url",
+            "updateUrl",
+            "download_url",
+            "downloadUrl",
+            "apk_url",
+            "apkUrl",
+            "app_url",
+            "appUrl",
+            "url",
+            "link"
+        ).firstNotNullOfOrNull { key ->
+            json.optString(key).trim().takeIf { it.isNotBlank() && it != "null" }
+        }.orEmpty()
+
+        val normalizedUrl = when {
+            rawUpdateUrl.startsWith("http://", ignoreCase = true) ||
+                rawUpdateUrl.startsWith("https://", ignoreCase = true) -> rawUpdateUrl
+            rawUpdateUrl.startsWith("www.", ignoreCase = true) -> "https://$rawUpdateUrl"
+            else -> rawUpdateUrl
         }
-        val version = json.optString("version").takeIf { it.isNotBlank() && it != "null" }
-            ?: json.optString("latest_version").takeIf { it.isNotBlank() && it != "null" }
-            ?: json.optString("version_name").takeIf { it.isNotBlank() && it != "null" }
-            ?: ""
-        val versionCode = when {
-            json.has("version_code") -> json.optInt("version_code", 0)
-            json.has("versionCode") -> json.optInt("versionCode", 0)
-            else -> 0
-        }
-        val updateUrl = json.optString("update_url").takeIf { it.isNotBlank() && it != "null" }
-            ?: json.optString("url").takeIf { it.isNotBlank() && it != "null" }
-            ?: json.optString("download_url").takeIf { it.isNotBlank() && it != "null" }
-            ?: json.optString("apk_url").takeIf { it.isNotBlank() && it != "null" }
-            ?: ""
-        val title = json.optString("title").takeIf { it.isNotBlank() && it != "null" }
-            ?: "Update Available"
-        val changelog = json.optString("changelog").takeIf { it.isNotBlank() && it != "null" }
-            ?: json.optString("message").takeIf { it.isNotBlank() && it != "null" }
-            ?: json.optString("notes").takeIf { it.isNotBlank() && it != "null" }
-            ?: json.optString("description").takeIf { it.isNotBlank() && it != "null" }
-            ?: ""
+
+        val title = listOf("title", "update_title", "heading")
+            .firstNotNullOfOrNull { key ->
+                json.optString(key).trim().takeIf { it.isNotBlank() && it != "null" }
+            } ?: "Update Available"
+
+        val changelog = listOf("changelog", "message", "notes", "release_notes", "description")
+            .firstNotNullOfOrNull { key ->
+                json.optString(key).trim().takeIf { it.isNotBlank() && it != "null" }
+            } ?: ""
+
         return AppUpdateInfo(
             updateEnabled = enabled,
-            version = version.trim(),
+            version = rawVersion,
             versionCode = versionCode,
-            updateUrl = updateUrl.trim(),
-            title = title.trim(),
-            changelog = changelog.trim()
+            updateUrl = normalizedUrl,
+            title = title,
+            changelog = changelog
         )
+    }
+
+    fun parseRemoteAppConfig(rawJson: String): RemoteAppConfig? {
+        val trimmed = rawJson.trim().removePrefix("\uFEFF")
+        val json = runCatching { JSONObject(trimmed) }.getOrNull() ?: return null
+        val ytKey = listOf("youtube_api_key", "youtubeApiKey", "yt_api_key")
+            .firstNotNullOfOrNull { key ->
+                json.optString(key).trim().takeIf { it.isNotBlank() && it != "null" }
+            }
+        val dlUrl = listOf("download_api_url", "downloadApiUrl", "api_url")
+            .firstNotNullOfOrNull { key ->
+                json.optString(key).trim().takeIf { it.isNotBlank() && it != "null" }
+            }
+        val updatedAt = json.optString("updated_at").trim().takeIf { it.isNotBlank() && it != "null" }
+        if (ytKey == null && dlUrl == null) return null
+        return RemoteAppConfig(
+            youtubeApiKey = ytKey,
+            downloadApiUrl = dlUrl,
+            updatedAt = updatedAt
+        )
+    }
+
+    fun extractGistFileContent(gistApiJson: String, preferredFileName: String): String? {
+        val root = runCatching { JSONObject(gistApiJson) }.getOrNull() ?: return null
+        val files = root.optJSONObject("files") ?: return null
+        val exact = files.optJSONObject(preferredFileName)
+            ?.optString("content")
+            ?.takeIf { it.isNotBlank() }
+        if (exact != null) return exact
+
+        val keys = files.keys()
+        while (keys.hasNext()) {
+            val k = keys.next()
+            val content = files.optJSONObject(k)?.optString("content")?.takeIf { it.isNotBlank() }
+            if (content != null) return content
+        }
+        return null
+    }
+
+    fun normalizeVersionString(version: String): String {
+        return version.trim().removePrefix("v").removePrefix("V")
+    }
+
+    /**
+     * Compares two version strings numerically segment-by-segment (e.g. "v1.0.1" > "1.0", "1.2" > "1.0.5").
+     * Returns >0 if candidate > current, 0 if equal, <0 if candidate < current.
+     */
+    fun compareVersions(candidate: String, current: String): Int {
+        val normA = normalizeVersionString(candidate)
+        val normB = normalizeVersionString(current)
+        if (normA.isBlank() && normB.isBlank()) return 0
+        if (normA.isBlank()) return -1
+        if (normB.isBlank()) return 1
+
+        val partsA = normA.split(Regex("[^0-9]+")).filter { it.isNotEmpty() }.mapNotNull { it.toIntOrNull() }
+        val partsB = normB.split(Regex("[^0-9]+")).filter { it.isNotEmpty() }.mapNotNull { it.toIntOrNull() }
+
+        if (partsA.isEmpty() || partsB.isEmpty()) {
+            return normA.compareTo(normB, ignoreCase = true)
+        }
+
+        val maxLen = maxOf(partsA.size, partsB.size)
+        for (i in 0 until maxLen) {
+            val a = partsA.getOrElse(i) { 0 }
+            val b = partsB.getOrElse(i) { 0 }
+            if (a != b) return a.compareTo(b)
+        }
+        return 0
+    }
+
+    fun isVersionNewer(
+        remoteVersion: String,
+        remoteVersionCode: Int,
+        installedVersion: String,
+        installedVersionCode: Int
+    ): Boolean {
+        if (remoteVersionCode > installedVersionCode) return true
+        if (remoteVersion.isNotBlank() && compareVersions(remoteVersion, installedVersion) > 0) return true
+        return false
+    }
+
+    private fun parseFlexibleBoolean(json: JSONObject, vararg keys: String): Boolean {
+        for (key in keys) {
+            if (!json.has(key) || json.isNull(key)) continue
+            when (val raw = json.opt(key)) {
+                is Boolean -> return raw
+                is Number -> return raw.toInt() != 0
+                is String -> {
+                    val s = raw.trim().lowercase()
+                    return when (s) {
+                        "true", "on", "yes", "1", "enabled", "active" -> true
+                        "false", "off", "no", "0", "disabled", "inactive" -> false
+                        else -> false
+                    }
+                }
+            }
+        }
+        return false
     }
 
     private fun parseFlexibleLong(value: Any?): Long? {
@@ -388,17 +530,73 @@ class DownloadRepository(
         return dao.getDownloadedVideosForVideo(videoId)
     }
 
+    private fun withCacheBuster(url: String): String {
+        val separator = if (url.contains("?")) "&" else "?"
+        return "$url${separator}cb=${System.currentTimeMillis()}"
+    }
+
+    private suspend fun fetchFreshGistJson(
+        gistApiUrl: String,
+        unpinnedRawUrl: String,
+        pinnedRawUrl: String,
+        preferredFileName: String
+    ): Pair<String?, String?> {
+        var lastError: String? = null
+
+        // 1. GitHub Gist API returns latest commit content immediately without CDN raw lag
+        runCatching {
+            val apiResp = downloaderApi.fetchRawJson(withCacheBuster(gistApiUrl))
+            if (apiResp.isSuccessful) {
+                val apiBody = apiResp.body()?.string().orEmpty()
+                val content = DownloaderResponseParser.extractGistFileContent(apiBody, preferredFileName)
+                if (!content.isNullOrBlank()) return content to null
+            } else {
+                lastError = "HTTP ${apiResp.code()}"
+            }
+        }.onFailure { lastError = it.localizedMessage }
+
+        // 2. Unpinned Gist raw URL with cache-buster always tracks latest Gist revision
+        runCatching {
+            val rawResp = downloaderApi.fetchRawJson(withCacheBuster(unpinnedRawUrl))
+            if (rawResp.isSuccessful) {
+                val rawBody = rawResp.body()?.string().orEmpty()
+                if (rawBody.isNotBlank()) return rawBody to null
+            } else {
+                lastError = "HTTP ${rawResp.code()}"
+            }
+        }.onFailure { lastError = it.localizedMessage }
+
+        // 3. Original pinned fallback URL
+        runCatching {
+            val pinnedResp = downloaderApi.fetchRawJson(withCacheBuster(pinnedRawUrl))
+            if (pinnedResp.isSuccessful) {
+                val pinnedBody = pinnedResp.body()?.string().orEmpty()
+                if (pinnedBody.isNotBlank()) return pinnedBody to null
+            } else {
+                lastError = "HTTP ${pinnedResp.code()}"
+            }
+        }.onFailure { lastError = it.localizedMessage }
+
+        return null to (lastError ?: "Unable to reach GitHub Gist")
+    }
+
     suspend fun syncRemoteConfig(configUrl: String = FIXED_REMOTE_CONFIG_URL): ApiResult<RemoteAppConfig> {
         val cleanUrl = configUrl.trim().ifBlank { FIXED_REMOTE_CONFIG_URL }
         if (!cleanUrl.startsWith("http://") && !cleanUrl.startsWith("https://")) {
             return ApiResult.Error("Invalid remote config URL.")
         }
         return try {
-            val response = downloaderApi.fetchRemoteConfig(cleanUrl)
-            if (!response.isSuccessful) {
-                return ApiResult.Error("Remote config returned HTTP ${response.code()}", response.code())
+            val (rawJson, err) = fetchFreshGistJson(
+                gistApiUrl = REMOTE_CONFIG_GIST_API_URL,
+                unpinnedRawUrl = cleanUrl,
+                pinnedRawUrl = PINNED_REMOTE_CONFIG_URL,
+                preferredFileName = "velotube-config.json"
+            )
+            if (rawJson.isNullOrBlank()) {
+                return ApiResult.Error(err ?: "Empty remote config response.")
             }
-            val cfg = response.body() ?: return ApiResult.Error("Empty remote config response.")
+            val cfg = DownloaderResponseParser.parseRemoteAppConfig(rawJson)
+                ?: return ApiResult.Error("Invalid remote config JSON.")
             preferencesRepository.applyRemoteConfig(
                 downloadApiUrl = cfg.downloadApiUrl,
                 youtubeApiKey = cfg.youtubeApiKey
@@ -409,39 +607,58 @@ class DownloadRepository(
         }
     }
 
-    suspend fun checkForAppUpdate(ignoreAcknowledged: Boolean = false): AppUpdateInfo? = withContext(Dispatchers.IO) {
-        return@withContext try {
-            val response = downloaderApi.fetchRawJson(FIXED_APP_UPDATE_URL)
-            if (!response.isSuccessful) return@withContext null
-            val rawJson = response.body()?.string().orEmpty()
-            val info = DownloaderResponseParser.parseAppUpdateInfo(rawJson) ?: return@withContext null
-
-            if (!info.updateEnabled || info.updateUrl.isBlank() || info.version.isBlank()) {
-                return@withContext null
-            }
-            if (!info.updateUrl.startsWith("http://") && !info.updateUrl.startsWith("https://")) {
-                return@withContext null
+    suspend fun checkForAppUpdate(ignoreAcknowledged: Boolean = false): AppUpdateCheckResult =
+        withContext(Dispatchers.IO) {
+            val (rawJson, fetchErr) = fetchFreshGistJson(
+                gistApiUrl = APP_UPDATE_GIST_API_URL,
+                unpinnedRawUrl = FIXED_APP_UPDATE_URL,
+                pinnedRawUrl = PINNED_APP_UPDATE_URL,
+                preferredFileName = "update.json"
+            )
+            if (rawJson.isNullOrBlank()) {
+                return@withContext AppUpdateCheckResult.Error(fetchErr ?: "Empty update response")
             }
 
-            if (info.versionCode > 0 && info.versionCode <= BuildConfig.VERSION_CODE) {
-                return@withContext null
+            val info = DownloaderResponseParser.parseAppUpdateInfo(rawJson)
+                ?: return@withContext AppUpdateCheckResult.Error("Invalid update.json format")
+
+            if (!info.updateEnabled) {
+                return@withContext AppUpdateCheckResult.Disabled(info.version)
             }
-            if (info.versionCode <= 0 && info.version.equals(BuildConfig.VERSION_NAME, ignoreCase = true)) {
-                return@withContext null
+            if (info.updateUrl.isBlank() ||
+                (!info.updateUrl.startsWith("http://", ignoreCase = true) &&
+                    !info.updateUrl.startsWith("https://", ignoreCase = true))
+            ) {
+                return@withContext AppUpdateCheckResult.Error("Missing or invalid update_url in update.json")
+            }
+
+            val isNewer = DownloaderResponseParser.isVersionNewer(
+                remoteVersion = info.version,
+                remoteVersionCode = info.versionCode,
+                installedVersion = BuildConfig.VERSION_NAME,
+                installedVersionCode = BuildConfig.VERSION_CODE
+            )
+            if (!isNewer) {
+                return@withContext AppUpdateCheckResult.UpToDate(
+                    installedVersion = BuildConfig.VERSION_NAME,
+                    remoteVersion = info.version.ifBlank { "v${info.versionCode}" }
+                )
             }
 
             val acknowledged = preferencesRepository.preferencesFlow.first().acknowledgedUpdateVersion
-            if (!ignoreAcknowledged && acknowledged.isNotBlank() &&
-                acknowledged.equals(info.version, ignoreCase = true)
+            val normRemote = DownloaderResponseParser.normalizeVersionString(info.version)
+            val normAck = DownloaderResponseParser.normalizeVersionString(acknowledged)
+            if (!ignoreAcknowledged && normAck.isNotBlank() &&
+                normAck.equals(normRemote, ignoreCase = true)
             ) {
-                return@withContext null
+                return@withContext AppUpdateCheckResult.UpToDate(
+                    installedVersion = BuildConfig.VERSION_NAME,
+                    remoteVersion = info.version
+                )
             }
 
-            info
-        } catch (_: Exception) {
-            null
+            AppUpdateCheckResult.Available(info)
         }
-    }
 
     suspend fun acknowledgeUpdateVersion(version: String) {
         preferencesRepository.setAcknowledgedUpdateVersion(version)
@@ -584,7 +801,7 @@ class DownloadRepository(
             }
         }
 
-        return lastResp!!
+        return lastResp ?: throw IllegalStateException("Download server unreachable ($baseUrl)")
     }
 
     suspend fun resolvePlayableStreamUrl(videoId: String): ApiResult<String> = withContext(Dispatchers.IO) {
@@ -633,38 +850,94 @@ class DownloadRepository(
             val respBody = dlResp.body()
                 ?: return@withContext ApiResult.Error("Empty stream response")
             val contentType = respBody.contentType()?.toString()?.lowercase().orEmpty()
-            val isJson = contentType.contains("json")
-
-            if (!isJson && (contentType.startsWith("video/") ||
+            val isExplicitMedia = !contentType.contains("json") && (
+                contentType.startsWith("video/") ||
                     contentType.startsWith("audio/") ||
-                    contentType.contains("application/octet-stream"))
-            ) {
+                    contentType.contains("octet-stream")
+                )
+
+            if (isExplicitMedia) {
                 val streamFile = cacheBinaryStreamForPlayback(videoId, respBody.byteStream())
                 return@withContext ApiResult.Success(streamFile.absolutePath)
             }
 
-            val rawBytes = respBody.bytes()
-            val bodyStr = rawBytes.toString(Charsets.UTF_8)
-            val parsed = DownloaderResponseParser.parseDownloadResponse(bodyStr)
-            if (parsed == null) {
-                if (rawBytes.isNotEmpty()) {
-                    val streamFile = File(context.cacheDir, "velotube_stream_${videoId}.mp4")
-                    streamFile.writeBytes(rawBytes)
-                    return@withContext ApiResult.Success(streamFile.absolutePath)
-                }
-                return@withContext ApiResult.Error("Invalid response from stream endpoint")
+            val inspection = inspectResponseBodySafely(respBody)
+            if (inspection.jsonText != null) {
+                val parsed = DownloaderResponseParser.parseDownloadResponse(inspection.jsonText)
+                    ?: return@withContext ApiResult.Error("Invalid response from stream endpoint")
+                val rawUrl = parsed.downloadUrl
+                    ?: return@withContext ApiResult.Error(parsed.error ?: parsed.message ?: "No download_url returned")
+                val resolved = resolveUrlAgainstBase(baseUrl, rawUrl)
+                return@withContext ApiResult.Success(resolved)
+            } else {
+                val streamFile = cachePrefixedStreamForPlayback(
+                    videoId = videoId,
+                    prefixBytes = inspection.prefixBytes,
+                    remainingStream = inspection.remainingStream
+                )
+                return@withContext ApiResult.Success(streamFile.absolutePath)
             }
-
-            val rawUrl = parsed.downloadUrl
-                ?: return@withContext ApiResult.Error(parsed.error ?: parsed.message ?: "No download_url returned")
-            val resolved = resolveUrlAgainstBase(baseUrl, rawUrl)
-            ApiResult.Success(resolved)
-        } catch (e: Exception) {
-            ApiResult.Error(e.localizedMessage ?: "Failed to resolve HD stream")
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            ApiResult.Error(t.localizedMessage ?: "Failed to resolve HD stream")
         }
     }
 
+    private data class BodyInspection(
+        val jsonText: String? = null,
+        val prefixBytes: ByteArray = ByteArray(0),
+        val remainingStream: InputStream? = null
+    )
+
+    private fun inspectResponseBodySafely(
+        respBody: ResponseBody,
+        maxJsonBytes: Int = 512 * 1024
+    ): BodyInspection {
+        val stream = respBody.byteStream()
+        val headBuf = ByteArray(8 * 1024)
+        val firstRead = stream.read(headBuf)
+        if (firstRead <= 0) {
+            stream.close()
+            return BodyInspection(jsonText = "")
+        }
+
+        val firstNonWs = (0 until firstRead)
+            .map { headBuf[it].toInt().toChar() }
+            .firstOrNull { !it.isWhitespace() }
+
+        val contentType = respBody.contentType()?.toString()?.lowercase().orEmpty()
+        val looksLikeJson = contentType.contains("json") || firstNonWs == '{' || firstNonWs == '['
+
+        if (!looksLikeJson) {
+            return BodyInspection(
+                jsonText = null,
+                prefixBytes = headBuf.copyOf(firstRead),
+                remainingStream = stream
+            )
+        }
+
+        val jsonBuffer = ByteArrayOutputStream(firstRead)
+        jsonBuffer.write(headBuf, 0, firstRead)
+        val extra = ByteArray(8 * 1024)
+        while (jsonBuffer.size() < maxJsonBytes) {
+            val n = stream.read(extra)
+            if (n == -1) break
+            val allowed = minOf(n, maxJsonBytes - jsonBuffer.size())
+            jsonBuffer.write(extra, 0, allowed)
+        }
+        stream.close()
+        return BodyInspection(jsonText = jsonBuffer.toString(Charsets.UTF_8.name()))
+    }
+
     private fun cacheBinaryStreamForPlayback(videoId: String, inputStream: InputStream): File {
+        return cachePrefixedStreamForPlayback(videoId, ByteArray(0), inputStream)
+    }
+
+    private fun cachePrefixedStreamForPlayback(
+        videoId: String,
+        prefixBytes: ByteArray,
+        remainingStream: InputStream?
+    ): File {
         val cutoff = System.currentTimeMillis() - 2 * 60 * 60 * 1000L
         context.cacheDir.listFiles()?.forEach { file ->
             if (file.name.startsWith("velotube_stream_") && file.lastModified() < cutoff) {
@@ -672,10 +945,14 @@ class DownloadRepository(
             }
         }
         val streamFile = File(context.cacheDir, "velotube_stream_${videoId}.mp4")
-        inputStream.use { input ->
-            FileOutputStream(streamFile).use { output ->
+        FileOutputStream(streamFile).use { output ->
+            if (prefixBytes.isNotEmpty()) {
+                output.write(prefixBytes)
+            }
+            remainingStream?.use { input ->
                 input.copyTo(output)
             }
+            output.flush()
         }
         return streamFile
     }
@@ -758,15 +1035,15 @@ class DownloadRepository(
                     ?: throw IllegalStateException("Empty response from download API")
 
                 val contentType = respBody.contentType()?.toString()?.lowercase().orEmpty()
-                val isVideoBinary = !contentType.contains("json") && (
+                val headerLen = respBody.contentLength()
+                val effectiveLen = if (headerLen > 0L) headerLen else format.contentLengthBytes
+                val isExplicitVideoBinary = !contentType.contains("json") && (
                     contentType.startsWith("video/") ||
                         contentType.startsWith("audio/") ||
-                        contentType.contains("application/octet-stream")
+                        contentType.contains("octet-stream")
                     )
 
-                if (isVideoBinary) {
-                    val headerLen = respBody.contentLength()
-                    val effectiveLen = if (headerLen > 0L) headerLen else format.contentLengthBytes
+                if (isExplicitVideoBinary) {
                     _activeDownloads.update { map ->
                         val current = map[downloadId] ?: return@update map
                         map + (downloadId to current.copy(
@@ -781,52 +1058,69 @@ class DownloadRepository(
                         downloadId = downloadId
                     )
                 } else {
-                    val rawText = respBody.string()
-                    val parsed = DownloaderResponseParser.parseDownloadResponse(rawText)
-                        ?: throw IllegalStateException("API did not return valid JSON download response")
+                    val inspection = inspectResponseBodySafely(respBody)
+                    if (inspection.jsonText == null) {
+                        _activeDownloads.update { map ->
+                            val current = map[downloadId] ?: return@update map
+                            map + (downloadId to current.copy(
+                                status = DownloadJobStatus.DOWNLOADING,
+                                totalBytes = effectiveLen.coerceAtLeast(0L)
+                            ))
+                        }
+                        streamPrefixedToFileWithProgress(
+                            prefixBytes = inspection.prefixBytes,
+                            remainingStream = inspection.remainingStream,
+                            totalBytes = effectiveLen,
+                            targetFile = targetFile,
+                            downloadId = downloadId
+                        )
+                    } else {
+                        val parsed = DownloaderResponseParser.parseDownloadResponse(inspection.jsonText)
+                            ?: throw IllegalStateException("API did not return valid JSON download response")
 
-                    if (!parsed.error.isNullOrBlank() ||
-                        (!parsed.message.isNullOrBlank() && parsed.downloadUrl.isNullOrBlank())
-                    ) {
-                        throw IllegalStateException(parsed.error ?: parsed.message)
-                    }
+                        if (!parsed.error.isNullOrBlank() ||
+                            (!parsed.message.isNullOrBlank() && parsed.downloadUrl.isNullOrBlank())
+                        ) {
+                            throw IllegalStateException(parsed.error ?: parsed.message)
+                        }
 
-                    val expectedHeight = DownloaderResponseParser.extractHeight(format.formatId)
-                    val returnedHeight = parsed.selected?.height
-                    if (expectedHeight != null && returnedHeight != null && returnedHeight != expectedHeight) {
-                        throw IllegalStateException(
-                            "Requested ${format.qualityLabel} but server returned ${returnedHeight}p. Aborted to prevent wrong quality."
+                        val expectedHeight = DownloaderResponseParser.extractHeight(format.formatId)
+                        val returnedHeight = parsed.selected?.height
+                        if (expectedHeight != null && returnedHeight != null && returnedHeight != expectedHeight) {
+                            throw IllegalStateException(
+                                "Requested ${format.qualityLabel} but server returned ${returnedHeight}p. Aborted to prevent wrong quality."
+                            )
+                        }
+
+                        val rawDownloadUrl = parsed.downloadUrl
+                            ?.takeIf { it.isNotBlank() }
+                            ?: throw IllegalStateException("Missing download_url in API response")
+
+                        val resolvedDownloadUrl = resolveUrlAgainstBase(baseUrl, rawDownloadUrl)
+
+                        _activeDownloads.update { map ->
+                            val current = map[downloadId] ?: return@update map
+                            map + (downloadId to current.copy(status = DownloadJobStatus.DOWNLOADING))
+                        }
+
+                        downloadUrlToFile(
+                            downloadUrl = resolvedDownloadUrl,
+                            targetFile = targetFile,
+                            downloadId = downloadId,
+                            fallbackTotalBytes = format.contentLengthBytes
                         )
                     }
-
-                    val rawDownloadUrl = parsed.downloadUrl
-                        ?.takeIf { it.isNotBlank() }
-                        ?: throw IllegalStateException("Missing download_url in API response")
-
-                    val resolvedDownloadUrl = resolveUrlAgainstBase(baseUrl, rawDownloadUrl)
-
-                    _activeDownloads.update { map ->
-                        val current = map[downloadId] ?: return@update map
-                        map + (downloadId to current.copy(status = DownloadJobStatus.DOWNLOADING))
-                    }
-
-                    downloadUrlToFile(
-                        downloadUrl = resolvedDownloadUrl,
-                        targetFile = targetFile,
-                        downloadId = downloadId,
-                        fallbackTotalBytes = format.contentLengthBytes
-                    )
                 }
 
                 finishSaveAndExport(video, format, targetFile, fileName, exportToGallery, downloadId)
             } catch (_: CancellationException) {
                 _activeDownloads.update { it - downloadId }
-            } catch (e: Exception) {
+            } catch (t: Throwable) {
                 _activeDownloads.update { map ->
                     val current = map[downloadId] ?: return@update map
                     map + (downloadId to current.copy(
                         status = DownloadJobStatus.FAILED,
-                        errorMessage = e.localizedMessage ?: "Download failed"
+                        errorMessage = t.localizedMessage ?: "Download failed"
                     ))
                 }
             } finally {
@@ -846,6 +1140,10 @@ class DownloadRepository(
         exportToGallery: Boolean,
         downloadId: String
     ) {
+        if (!targetFile.exists() || targetFile.length() <= 0L) {
+            throw IllegalStateException("Downloaded file is empty or missing")
+        }
+
         var galleryUri: String? = null
         if (exportToGallery && format.hasVideo) {
             _activeDownloads.update { map ->
@@ -855,11 +1153,13 @@ class DownloadRepository(
                     status = DownloadJobStatus.EXPORTING_GALLERY
                 ))
             }
-            galleryUri = exportFileToGallery(
-                sourceFile = targetFile,
-                displayName = fileName,
-                mimeType = format.mimeType
-            )
+            galleryUri = runCatching {
+                exportFileToGallery(
+                    sourceFile = targetFile,
+                    displayName = fileName,
+                    mimeType = format.mimeType
+                )
+            }.getOrNull()
         }
 
         val finalSize = targetFile.length()
@@ -936,14 +1236,17 @@ class DownloadRepository(
                 val targetFile = File(appMoviesDir, fileName)
 
                 downloadUrlToFile(cleanUrl, targetFile, downloadId, 0L)
+                if (!targetFile.exists() || targetFile.length() <= 0L) {
+                    throw IllegalStateException("Downloaded file is empty")
+                }
 
                 val autoGallery = preferencesRepository.preferencesFlow.first().autoExportToGallery
                 val galleryUri = if (autoGallery && ext != "m4a") {
                     _activeDownloads.update { map ->
                         val cur = map[downloadId] ?: return@update map
-                        map + (downloadId to cur.copy(status = DownloadJobStatus.EXPORTING_GALLERY))
+                        map + (downloadId to cur.copy(progress = 1f, status = DownloadJobStatus.EXPORTING_GALLERY))
                     }
-                    exportFileToGallery(targetFile, fileName, mime)
+                    runCatching { exportFileToGallery(targetFile, fileName, mime) }.getOrNull()
                 } else null
 
                 val finalSize = targetFile.length()
@@ -975,12 +1278,12 @@ class DownloadRepository(
                 }
             } catch (_: CancellationException) {
                 _activeDownloads.update { it - downloadId }
-            } catch (e: Exception) {
+            } catch (t: Throwable) {
                 _activeDownloads.update { map ->
                     val cur = map[downloadId] ?: return@update map
                     map + (downloadId to cur.copy(
                         status = DownloadJobStatus.FAILED,
-                        errorMessage = e.localizedMessage ?: "Direct download failed"
+                        errorMessage = t.localizedMessage ?: "Direct download failed"
                     ))
                 }
             } finally {
@@ -1024,38 +1327,57 @@ class DownloadRepository(
         targetFile: File,
         downloadId: String
     ) {
-        inputStream.use { input ->
-            FileOutputStream(targetFile).use { output ->
-                val buffer = ByteArray(16 * 1024)
-                var downloaded = 0L
-                var lastUpdateMs = 0L
-                while (true) {
-                    val read = input.read(buffer)
-                    if (read == -1) break
-                    output.write(buffer, 0, read)
-                    downloaded += read
+        streamPrefixedToFileWithProgress(
+            prefixBytes = ByteArray(0),
+            remainingStream = inputStream,
+            totalBytes = totalBytes,
+            targetFile = targetFile,
+            downloadId = downloadId
+        )
+    }
 
-                    val now = System.currentTimeMillis()
-                    if (now - lastUpdateMs > 100L) {
-                        lastUpdateMs = now
-                        val fraction = if (totalBytes > 0) {
-                            (downloaded.toFloat() / totalBytes.toFloat()).coerceIn(0f, 1f)
-                        } else {
-                            0f
-                        }
-                        _activeDownloads.update { map ->
-                            val current = map[downloadId] ?: return@update map
-                            map + (downloadId to current.copy(
-                                progress = fraction,
-                                bytesDownloaded = downloaded,
-                                totalBytes = totalBytes.coerceAtLeast(0L),
-                                status = DownloadJobStatus.DOWNLOADING
-                            ))
+    private fun streamPrefixedToFileWithProgress(
+        prefixBytes: ByteArray,
+        remainingStream: InputStream?,
+        totalBytes: Long,
+        targetFile: File,
+        downloadId: String
+    ) {
+        FileOutputStream(targetFile).use { output ->
+            var downloaded = 0L
+            if (prefixBytes.isNotEmpty()) {
+                output.write(prefixBytes)
+                downloaded += prefixBytes.size
+            }
+            if (remainingStream != null) {
+                remainingStream.use { input ->
+                    val buffer = ByteArray(16 * 1024)
+                    var lastUpdateMs = 0L
+                    while (true) {
+                        val read = input.read(buffer)
+                        if (read == -1) break
+                        output.write(buffer, 0, read)
+                        downloaded += read
+
+                        val now = System.currentTimeMillis()
+                        if (now - lastUpdateMs > 100L) {
+                            lastUpdateMs = now
+                            val rawFrac = if (totalBytes > 0L) downloaded.toFloat() / totalBytes.toFloat() else 0f
+                            val fraction = if (rawFrac.isFinite()) rawFrac.coerceIn(0f, 1f) else 0f
+                            _activeDownloads.update { map ->
+                                val current = map[downloadId] ?: return@update map
+                                map + (downloadId to current.copy(
+                                    progress = fraction,
+                                    bytesDownloaded = downloaded,
+                                    totalBytes = totalBytes.coerceAtLeast(0L),
+                                    status = DownloadJobStatus.DOWNLOADING
+                                ))
+                            }
                         }
                     }
                 }
-                output.flush()
             }
+            output.flush()
         }
     }
 
@@ -1153,20 +1475,28 @@ class DownloadRepository(
         displayName: String,
         mimeType: String
     ): String? = withContext(Dispatchers.IO) {
-        if (!sourceFile.exists()) return@withContext null
+        if (!sourceFile.exists() || sourceFile.length() <= 0L) return@withContext null
+
+        val safeMime = when {
+            mimeType.startsWith("video/") -> mimeType
+            displayName.endsWith(".webm", ignoreCase = true) -> "video/webm"
+            displayName.endsWith(".mkv", ignoreCase = true) -> "video/x-matroska"
+            else -> "video/mp4"
+        }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val resolver = context.contentResolver
-            val values = ContentValues().apply {
-                put(MediaStore.Video.Media.DISPLAY_NAME, displayName)
-                put(MediaStore.Video.Media.MIME_TYPE, mimeType)
-                put(MediaStore.Video.Media.RELATIVE_PATH, "${Environment.DIRECTORY_MOVIES}/YmnTube")
-                put(MediaStore.Video.Media.IS_PENDING, 1)
-            }
-            val collection = MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-            val insertedUri = resolver.insert(collection, values) ?: return@withContext null
-
+            var insertedUri: Uri? = null
             return@withContext try {
+                val values = ContentValues().apply {
+                    put(MediaStore.Video.Media.DISPLAY_NAME, displayName)
+                    put(MediaStore.Video.Media.MIME_TYPE, safeMime)
+                    put(MediaStore.Video.Media.RELATIVE_PATH, "${Environment.DIRECTORY_MOVIES}/YmnTube")
+                    put(MediaStore.Video.Media.IS_PENDING, 1)
+                }
+                val collection = MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+                insertedUri = resolver.insert(collection, values) ?: return@withContext null
+
                 resolver.openOutputStream(insertedUri)?.use { out ->
                     sourceFile.inputStream().use { input ->
                         input.copyTo(out)
@@ -1177,18 +1507,18 @@ class DownloadRepository(
                 }
                 resolver.update(insertedUri, publishValues, null, null)
                 insertedUri.toString()
-            } catch (_: Exception) {
-                runCatching { resolver.delete(insertedUri, null, null) }
+            } catch (_: Throwable) {
+                insertedUri?.let { uri -> runCatching { resolver.delete(uri, null, null) } }
                 null
             }
         } else {
-            val hasWritePerm = ContextCompat.checkSelfPermission(
-                context,
-                Manifest.permission.WRITE_EXTERNAL_STORAGE
-            ) == PackageManager.PERMISSION_GRANTED
-            if (!hasWritePerm) return@withContext null
-
             return@withContext try {
+                val hasWritePerm = ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.WRITE_EXTERNAL_STORAGE
+                ) == PackageManager.PERMISSION_GRANTED
+                if (!hasWritePerm) return@withContext null
+
                 @Suppress("DEPRECATION")
                 val publicDir = File(
                     Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES),
@@ -1196,8 +1526,8 @@ class DownloadRepository(
                 ).apply { mkdirs() }
                 val destFile = File(publicDir, displayName)
                 sourceFile.copyTo(destFile, overwrite = true)
-                scanMediaFile(destFile.absolutePath, mimeType)
-            } catch (_: Exception) {
+                scanMediaFile(destFile.absolutePath, safeMime)
+            } catch (_: Throwable) {
                 null
             }
         }

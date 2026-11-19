@@ -11,6 +11,7 @@ import com.example.data.model.AppUpdateInfo
 import com.example.data.model.DownloadFormat
 import com.example.data.model.VideoItem
 import com.example.data.remote.FormatUtils
+import com.example.data.repository.AppUpdateCheckResult
 import com.example.data.repository.DownloadRepository
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -55,13 +56,36 @@ class DownloadPromptViewModel(
     private val _availableUpdate = MutableStateFlow<AppUpdateInfo?>(null)
     val availableUpdate: StateFlow<AppUpdateInfo?> = _availableUpdate.asStateFlow()
 
+    private val _isCheckingUpdate = MutableStateFlow(false)
+    val isCheckingUpdate: StateFlow<Boolean> = _isCheckingUpdate.asStateFlow()
+
     fun checkForAppUpdate(manual: Boolean = false) {
+        if (_isCheckingUpdate.value) return
         viewModelScope.launch {
-            val update = downloadRepository.checkForAppUpdate(ignoreAcknowledged = manual)
-            if (update != null) {
-                _availableUpdate.value = update
-            } else if (manual) {
-                _statusToast.value = "YmnTube v${BuildConfig.VERSION_NAME} is up to date"
+            _isCheckingUpdate.value = true
+            try {
+                when (val result = downloadRepository.checkForAppUpdate(ignoreAcknowledged = manual)) {
+                    is AppUpdateCheckResult.Available -> {
+                        _availableUpdate.value = result.info
+                    }
+                    is AppUpdateCheckResult.Disabled -> {
+                        if (manual) {
+                            _statusToast.value = "App update is turned off right now"
+                        }
+                    }
+                    is AppUpdateCheckResult.UpToDate -> {
+                        if (manual) {
+                            _statusToast.value = "YmnTube v${result.installedVersion} is up to date"
+                        }
+                    }
+                    is AppUpdateCheckResult.Error -> {
+                        if (manual) {
+                            _statusToast.value = "Update check failed: ${result.message}"
+                        }
+                    }
+                }
+            } finally {
+                _isCheckingUpdate.value = false
             }
         }
     }

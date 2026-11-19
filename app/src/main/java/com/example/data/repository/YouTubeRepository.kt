@@ -35,8 +35,9 @@ class YouTubeRepository(
     }
 
     /**
-     * Personalized Home feed based on user taste (watch history, saved videos, searches),
-     * blended with fresh regional (BD) videos when history is sparse or empty.
+     * Personalized Home feed analyzing overall user taste across watch history, watchlist,
+     * and search history — blending topic clusters, favorite creators, fresh discovery,
+     * and regional videos with strict anti-repetition & title deduplication.
      */
     suspend fun getHomeSuggestions(
         category: YouTubeCategory,
@@ -51,14 +52,19 @@ class YouTubeRepository(
                 val recentWatches = runCatching { dao.observeWatchHistory().first() }.getOrDefault(emptyList())
                 val savedVideos = runCatching { dao.observeWatchlist().first() }.getOrDefault(emptyList())
 
-                val tasteQueries = buildTasteQueries(recentSearches, recentWatches, savedVideos)
+                val tasteQueries = HomeSuggestionEngine.buildDiverseTasteQueries(
+                    searches = recentSearches,
+                    watches = recentWatches,
+                    saved = savedVideos,
+                    regionCode = regionCode
+                )
 
                 val popularDeferred = async {
                     runCatching {
                         api.getPopularVideos(
                             regionCode = regionCode,
                             videoCategoryId = null,
-                            maxResults = 16,
+                            maxResults = 20,
                             apiKey = apiKey
                         ).items.map { it.toDomain() }
                     }.getOrDefault(emptyList())
@@ -69,7 +75,7 @@ class YouTubeRepository(
                         runCatching {
                             val searchResp = api.searchVideos(
                                 query = query,
-                                maxResults = 10,
+                                maxResults = 8,
                                 apiKey = apiKey
                             )
                             val ids = searchResp.items.mapNotNull { it.id?.videoId }.distinct()
@@ -80,31 +86,43 @@ class YouTubeRepository(
                     }
                 }
 
-                val personalizedVideos = personalizedDeferreds.flatMap { it.await() }
+                val personalizedBuckets = personalizedDeferreds.map { it.await() }
                 val regionalVideos = popularDeferred.await()
 
+                val allBuckets = personalizedBuckets + listOf(regionalVideos)
                 val watchedIds = recentWatches.map { it.videoId }.toSet()
-                val combined = (personalizedVideos + regionalVideos)
-                    .distinctBy { it.id }
+                val preferredChannels = (savedVideos + recentWatches)
+                    .map { it.channelTitle.trim().lowercase() }
+                    .filter { it.isNotBlank() }
+                    .toSet()
 
-                if (combined.isEmpty()) {
-                    // Fallback query if both regional popular & taste failed
+                val diverse = HomeSuggestionEngine.rankAndDiversify(
+                    buckets = allBuckets,
+                    watchedIds = watchedIds,
+                    preferredChannels = preferredChannels,
+                    limit = 30
+                )
+
+                if (diverse.isEmpty()) {
                     val fallbackResp = api.searchVideos(
-                        query = if (regionCode == "BD") "Bangla music natok tech" else "popular videos",
+                        query = if (regionCode == "BD") "Bangla music natok tech vlog" else "popular new videos",
                         maxResults = 20,
                         apiKey = apiKey
                     )
                     val ids = fallbackResp.items.mapNotNull { it.id?.videoId }.distinct()
                     if (ids.isEmpty()) return@coroutineScope ApiResult.Success(emptyList())
                     val details = api.getVideosByIds(ids = ids.joinToString(","), apiKey = apiKey)
-                    val enriched = enrichWithChannelAvatars(details.items.map { it.toDomain() }, apiKey)
+                    val fallbackDiverse = HomeSuggestionEngine.rankAndDiversify(
+                        buckets = listOf(details.items.map { it.toDomain() }),
+                        watchedIds = watchedIds,
+                        preferredChannels = preferredChannels,
+                        limit = 24
+                    )
+                    val enriched = enrichWithChannelAvatars(fallbackDiverse, apiKey)
                     return@coroutineScope ApiResult.Success(enriched)
                 }
 
-                // Put fresh/unwatched personalized picks first, keeping watched items at the end
-                val (fresh, seen) = combined.partition { it.id !in watchedIds }
-                val ordered = (fresh + seen).take(30)
-                val enriched = enrichWithChannelAvatars(ordered, apiKey)
+                val enriched = enrichWithChannelAvatars(diverse, apiKey)
                 return@coroutineScope ApiResult.Success(enriched)
             } else {
                 val categoryVideos = runCatching {
@@ -120,8 +138,6 @@ class YouTubeRepository(
                     return@coroutineScope ApiResult.Success(enrichWithChannelAvatars(categoryVideos, apiKey))
                 }
 
-                // Some categories (e.g. Tech/Learn/Gaming in BD) aren't indexed on chart=mostPopular;
-                // fall back cleanly to regional category search.
                 val searchResp = api.searchVideos(
                     query = "${category.label} ${if (regionCode == "BD") "Bangladesh" else ""}".trim(),
                     maxResults = 24,
@@ -138,37 +154,6 @@ class YouTubeRepository(
         } catch (e: Exception) {
             ApiResult.Error(e.localizedMessage ?: "Failed to load videos")
         }
-    }
-
-    private fun buildTasteQueries(
-        searches: List<SearchHistoryEntity>,
-        watches: List<WatchHistoryEntity>,
-        saved: List<WatchHistoryEntity>
-    ): List<String> {
-        val signals = mutableListOf<String>()
-
-        // 1. Most recent searches reflect explicit user intent
-        searches.take(2).forEach { s ->
-            val clean = s.query.trim()
-            if (clean.length >= 2) signals.add(clean)
-        }
-
-        // 2. Favorite channels or topics from saved/watched videos
-        val preferredEntries = (saved.take(3) + watches.take(5)).distinctBy { it.videoId }
-        preferredEntries
-            .mapNotNull { entry ->
-                val words = entry.title
-                    .replace(Regex("[^\\p{L}\\p{N}\\s]"), " ")
-                    .split(Regex("\\s+"))
-                    .filter { it.length >= 4 }
-                    .take(3)
-                if (words.isNotEmpty()) words.joinToString(" ")
-                else entry.channelTitle.takeIf { it.isNotBlank() }
-            }
-            .take(2)
-            .forEach { signals.add(it) }
-
-        return signals.distinct().take(3)
     }
 
     suspend fun searchVideos(query: String): ApiResult<List<VideoItem>> {
@@ -387,5 +372,291 @@ class YouTubeRepository(
             404 -> "Requested YouTube resource was not found."
             else -> "YouTube API error (${e.code()})"
         }
+    }
+}
+
+internal object HomeSuggestionEngine {
+    private val noiseWords = setOf(
+        "official", "video", "videos", "music", "audio", "song", "songs", "full",
+        "lyric", "lyrics", "lyrical", "new", "latest", "status", "short", "shorts",
+        "reel", "reels", "remix", "cover", "version", "live", "hd", "4k", "1080p",
+        "720p", "mp3", "mp4", "part", "episode", "ep", "teaser", "trailer", "viral",
+        "trending", "best", "top", "super", "hit", "hits", "feat", "ft", "vs",
+        "with", "from", "this", "that", "your", "you", "are", "for", "and", "the",
+        "2023", "2024", "2025", "2026", "watch", "play"
+    )
+
+    private data class TasteCategoryRule(
+        val id: String,
+        val triggers: Set<String>,
+        val bdQuery: String,
+        val globalQuery: String
+    )
+
+    private val categoryRules = listOf(
+        TasteCategoryRule(
+            id = "bangla_music",
+            triggers = setOf("bangla", "বাংলা", "গান", "gaan", "gan", "habib", "tahsan", "imran", "minar", "asif", "arnob", "artcell", "warfed", "lrb", "james", "ayub", "konal", "readoy", "pora"),
+            bdQuery = "new Bangla romantic sad music mix",
+            globalQuery = "Bangla new music hits playlist"
+        ),
+        TasteCategoryRule(
+            id = "music",
+            triggers = setOf("song", "songs", "music", "lofi", "melody", "singer", "band", "arijit", "atif", "shreya", "arjit", "jubin", "qawwali", "ghazal", "gazal", "rap", "hiphop", "rock", "pop", "nasheed"),
+            bdQuery = "new Hindi Bangla trending songs playlist",
+            globalQuery = "new trending music mix playlist"
+        ),
+        TasteCategoryRule(
+            id = "natok_drama",
+            triggers = setOf("natok", "নাটক", "drama", "telefilm", "movie", "film", "cinema", "webseries", "series", "comedy", "apurba", "afran", "nisho", "mehazabien", "tawsif", "mosharraf"),
+            bdQuery = "new Bangla natok drama 2026",
+            globalQuery = "new comedy drama short film"
+        ),
+        TasteCategoryRule(
+            id = "tech",
+            triggers = setOf("tech", "phone", "mobile", "smartphone", "review", "unboxing", "android", "iphone", "samsung", "xiaomi", "laptop", "pc", "coding", "programming", "kotlin", "ai", "gadget", "camera"),
+            bdQuery = "Bangla tech smartphone review latest",
+            globalQuery = "latest tech smartphone gadgets review"
+        ),
+        TasteCategoryRule(
+            id = "gaming",
+            triggers = setOf("game", "gaming", "gameplay", "pubg", "freefire", "valorant", "minecraft", "gta", "fifa", "efootball", "esports", "walkthrough"),
+            bdQuery = "gaming highlights live stream Bangladesh",
+            globalQuery = "gaming highlights walkthrough new"
+        ),
+        TasteCategoryRule(
+            id = "sports",
+            triggers = setOf("cricket", "football", "ipl", "bpl", "match", "highlights", "goal", "goals", "worldcup", "messi", "ronaldo", "shakib", "tamim", "tigers"),
+            bdQuery = "cricket football match highlights",
+            globalQuery = "football cricket sports highlights"
+        ),
+        TasteCategoryRule(
+            id = "knowledge",
+            triggers = setOf("news", "podcast", "interview", "documentary", "history", "science", "space", "mystery", "facts", "fact", "explained", "story", "analysis"),
+            bdQuery = "Bangla documentary podcast science story",
+            globalQuery = "interesting documentary science podcast"
+        ),
+        TasteCategoryRule(
+            id = "vlog_food",
+            triggers = setOf("vlog", "travel", "tour", "food", "streetfood", "recipe", "cooking", "kitchen", "biryani", "village"),
+            bdQuery = "Bangladeshi travel street food vlog",
+            globalQuery = "travel food vlog adventure"
+        ),
+        TasteCategoryRule(
+            id = "islamic",
+            triggers = setOf("waz", "islamic", "quran", "tilawat", "azan", "ahmadullah", "mizanur", "azhari", "tariq", "lecture", "motivation"),
+            bdQuery = "new Bangla islamic waz lecture",
+            globalQuery = "islamic reminder motivation lecture"
+        )
+    )
+
+    fun extractCoreTokens(text: String): List<String> {
+        val withoutBrackets = text
+            .replace(Regex("\\([^)]*\\)"), " ")
+            .replace(Regex("\\[[^\\]]*\\]"), " ")
+        return withoutBrackets
+            .replace(Regex("[^\\p{L}\\p{N}\\s]"), " ")
+            .lowercase()
+            .split(Regex("\\s+"))
+            .map { it.trim() }
+            .filter { token ->
+                token.length >= 2 &&
+                    token !in noiseWords &&
+                    !token.all { it.isDigit() }
+            }
+            .distinct()
+    }
+
+    fun areTitlesSimilar(titleA: String, titleB: String): Boolean {
+        val tokensA = extractCoreTokens(titleA)
+        val tokensB = extractCoreTokens(titleB)
+        if (tokensA.isEmpty() || tokensB.isEmpty()) {
+            return titleA.trim().equals(titleB.trim(), ignoreCase = true)
+        }
+        val setA = tokensA.toSet()
+        val setB = tokensB.toSet()
+        val intersection = setA.intersect(setB).size
+        if (intersection == 0) return false
+        val union = setA.union(setB).size
+        val jaccard = intersection.toFloat() / union.toFloat()
+        if (jaccard >= 0.48f) return true
+
+        val prefixLen = minOf(3, minOf(tokensA.size, tokensB.size))
+        if (prefixLen >= 2 && tokensA.take(prefixLen) == tokensB.take(prefixLen)) {
+            return true
+        }
+        return false
+    }
+
+    fun buildDiverseTasteQueries(
+        searches: List<SearchHistoryEntity>,
+        watches: List<WatchHistoryEntity>,
+        saved: List<WatchHistoryEntity>,
+        regionCode: String
+    ): List<String> {
+        val queries = mutableListOf<String>()
+        val isBd = regionCode.equals("BD", ignoreCase = true)
+
+        // Aggregate overall weighted tokens and title-clusters to avoid repeating a single video
+        val topicScores = mutableMapOf<String, Int>()
+        val seenClusters = mutableListOf<String>()
+        val channelCounts = mutableMapOf<String, Int>()
+        val categoryScores = mutableMapOf<String, Int>()
+
+        fun scoreText(text: String, weight: Int, dedupeCluster: Boolean) {
+            if (dedupeCluster && seenClusters.any { areTitlesSimilar(it, text) }) {
+                return
+            }
+            if (dedupeCluster) seenClusters.add(text)
+
+            val rawTokens = text
+                .replace(Regex("[^\\p{L}\\p{N}\\s]"), " ")
+                .lowercase()
+                .split(Regex("\\s+"))
+                .filter { it.length >= 2 }
+
+            for (rule in categoryRules) {
+                if (rawTokens.any { it in rule.triggers }) {
+                    categoryScores[rule.id] = (categoryScores[rule.id] ?: 0) + weight
+                }
+            }
+
+            extractCoreTokens(text).forEach { tok ->
+                if (tok.length >= 3) {
+                    topicScores[tok] = (topicScores[tok] ?: 0) + weight
+                }
+            }
+        }
+
+        saved.take(20).forEach { entry ->
+            scoreText(entry.title, weight = 3, dedupeCluster = true)
+            if (entry.channelTitle.isNotBlank()) {
+                channelCounts[entry.channelTitle.trim()] =
+                    (channelCounts[entry.channelTitle.trim()] ?: 0) + 3
+            }
+        }
+        watches.take(35).forEach { entry ->
+            scoreText(entry.title, weight = 2, dedupeCluster = true)
+            if (entry.channelTitle.isNotBlank()) {
+                channelCounts[entry.channelTitle.trim()] =
+                    (channelCounts[entry.channelTitle.trim()] ?: 0) + 2
+            }
+        }
+        searches.take(12).forEach { search ->
+            scoreText(search.query, weight = 2, dedupeCluster = true)
+        }
+
+        // 1. Top inferred broad interest categories (gives NEW videos in user's taste!)
+        val topCategories = categoryScores.entries
+            .sortedByDescending { it.value }
+            .mapNotNull { entry -> categoryRules.firstOrNull { it.id == entry.key } }
+            .take(2)
+        topCategories.forEach { rule ->
+            queries.add(if (isBd) rule.bdQuery else rule.globalQuery)
+        }
+
+        // 2. Favorite creator's fresh/other uploads
+        val topCreator = channelCounts.entries
+            .sortedByDescending { it.value }
+            .firstOrNull()
+            ?.key
+            ?.trim()
+        if (!topCreator.isNullOrBlank()) {
+            queries.add("$topCreator new video")
+        }
+
+        // 3. Cross-topic blend from distinct keywords across different videos (never copying one title)
+        val topKeywords = topicScores.entries
+            .sortedByDescending { it.value }
+            .map { it.key }
+            .take(4)
+        if (topKeywords.isNotEmpty()) {
+            val blend = topKeywords.take(2).joinToString(" ")
+            queries.add("$blend new mix")
+        } else if (searches.isNotEmpty()) {
+            val latestSearch = searches.first().query.trim()
+            if (latestSearch.length >= 2) queries.add("$latestSearch mix")
+        }
+
+        // 4. Adjacent discovery query so home always introduces fresh variety
+        val discoveryPool = if (isBd) {
+            listOf(
+                "new Bangla song playlist",
+                "Bangla tech vlog science new",
+                "new Bangla natok comedy",
+                "Bangladesh travel documentary"
+            )
+        } else {
+            listOf(
+                "new trending music mix",
+                "latest tech science documentary",
+                "comedy gaming highlights new"
+            )
+        }
+        val unusedDiscovery = discoveryPool.firstOrNull { cand ->
+            queries.none { q -> q.equals(cand, ignoreCase = true) }
+        }
+        if (unusedDiscovery != null && queries.size < 4) {
+            queries.add(unusedDiscovery)
+        }
+
+        return queries.distinct().take(4)
+    }
+
+    fun rankAndDiversify(
+        buckets: List<List<VideoItem>>,
+        watchedIds: Set<String>,
+        preferredChannels: Set<String>,
+        limit: Int = 30
+    ): List<VideoItem> {
+        // Round-robin interleave buckets so no single query dominates the top of the feed
+        val interleaved = mutableListOf<VideoItem>()
+        val maxSize = buckets.maxOfOrNull { it.size } ?: 0
+        for (i in 0 until maxSize) {
+            for (bucket in buckets) {
+                if (i < bucket.size) {
+                    interleaved.add(bucket[i])
+                }
+            }
+        }
+
+        val uniqueById = interleaved.distinctBy { it.id }
+        val (freshCandidates, seenCandidates) = uniqueById.partition { it.id !in watchedIds }
+        val orderedCandidates = freshCandidates + seenCandidates
+
+        val accepted = mutableListOf<VideoItem>()
+        val acceptedPerChannel = mutableMapOf<String, Int>()
+
+        for (candidate in orderedCandidates) {
+            if (accepted.size >= limit) break
+
+            val channelKey = candidate.channelTitle.trim().lowercase()
+            val channelCount = if (channelKey.isNotBlank()) acceptedPerChannel[channelKey] ?: 0 else 0
+            val channelCap = if (channelKey in preferredChannels) 3 else 2
+            if (channelCount >= channelCap) continue
+
+            // Drop near-duplicate titles of videos already selected in the feed
+            if (accepted.any { existing -> areTitlesSimilar(existing.title, candidate.title) }) {
+                continue
+            }
+
+            accepted.add(candidate)
+            if (channelKey.isNotBlank()) {
+                acceptedPerChannel[channelKey] = channelCount + 1
+            }
+        }
+
+        // Only pad with remaining non-duplicate IDs if strict diversity left fewer than 10 items
+        if (accepted.size < 10) {
+            val acceptedIds = accepted.map { it.id }.toSet()
+            for (candidate in orderedCandidates) {
+                if (accepted.size >= limit) break
+                if (candidate.id !in acceptedIds) {
+                    accepted.add(candidate)
+                }
+            }
+        }
+
+        return accepted.take(limit)
     }
 }

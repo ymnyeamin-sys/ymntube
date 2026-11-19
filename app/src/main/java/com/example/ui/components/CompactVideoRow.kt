@@ -112,8 +112,11 @@ fun CompactVideoRow(
                     }
                 }
                 if (isDownloadingNow) {
+                    val safeProgress = (activeDownload?.progress ?: 0f).let {
+                        if (it.isFinite()) it.coerceIn(0f, 1f) else 0f
+                    }
                     LinearProgressIndicator(
-                        progress = { activeDownload?.progress ?: 0f },
+                        progress = { safeProgress },
                         color = CyanElectric,
                         trackColor = Color.Black.copy(alpha = 0.5f),
                         modifier = Modifier

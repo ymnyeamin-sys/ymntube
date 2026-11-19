@@ -19,6 +19,12 @@ class PlaybackService : MediaSessionService() {
     @OptIn(UnstableApi::class)
     override fun onCreate() {
         super.onCreate()
+        setListener(object : Listener {
+            override fun onForegroundServiceStartNotAllowedException() {
+                runCatching { stopSelf() }
+            }
+        })
+
         val audioAttributes = AudioAttributes.Builder()
             .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
             .setUsage(C.USAGE_MEDIA)
@@ -61,9 +67,10 @@ class PlaybackService : MediaSessionService() {
     }
 
     override fun onDestroy() {
+        clearListener()
         mediaSession?.run {
-            player.release()
-            release()
+            runCatching { player.release() }
+            runCatching { release() }
             mediaSession = null
         }
         super.onDestroy()

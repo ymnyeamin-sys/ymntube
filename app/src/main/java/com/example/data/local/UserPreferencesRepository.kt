@@ -14,9 +14,19 @@ private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(na
 
 const val DEFAULT_DOWNLOAD_API_BASE_URL = "https://ytdlp-production-4d018ba3.up.railway.app"
 const val FIXED_REMOTE_CONFIG_URL =
+    "https://gist.githubusercontent.com/ymnyeamin-sys/798b5138b7a6d2bb994657ac18a29abd/raw/velotube-config.json"
+const val PINNED_REMOTE_CONFIG_URL =
     "https://gist.githubusercontent.com/ymnyeamin-sys/798b5138b7a6d2bb994657ac18a29abd/raw/80c6068597c44a85faca73bd03e525d73a812f0a/velotube-config.json"
+const val REMOTE_CONFIG_GIST_API_URL =
+    "https://api.github.com/gists/798b5138b7a6d2bb994657ac18a29abd"
+
 const val FIXED_APP_UPDATE_URL =
+    "https://gist.githubusercontent.com/ymnyeamin-sys/88048ef1878947e0dd82de124cb3625d/raw/update.json"
+const val PINNED_APP_UPDATE_URL =
     "https://gist.githubusercontent.com/ymnyeamin-sys/88048ef1878947e0dd82de124cb3625d/raw/e480f790228650d93e8e010d8551bed985a53a11/update.json"
+const val APP_UPDATE_GIST_API_URL =
+    "https://api.github.com/gists/88048ef1878947e0dd82de124cb3625d"
+
 const val DEFAULT_REGION_CODE = "BD"
 
 data class UserPreferences(
@@ -70,7 +80,8 @@ class UserPreferencesRepository(private val context: Context) {
     }
 
     suspend fun setAcknowledgedUpdateVersion(version: String) {
-        context.dataStore.edit { it[Keys.ACKNOWLEDGED_UPDATE_VERSION] = version.trim() }
+        val normalized = version.trim().removePrefix("v").removePrefix("V")
+        context.dataStore.edit { it[Keys.ACKNOWLEDGED_UPDATE_VERSION] = normalized }
     }
 
     suspend fun applyRemoteConfig(

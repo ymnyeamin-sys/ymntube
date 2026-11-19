@@ -76,6 +76,7 @@ fun LibraryScreen(
     viewModel: LibraryViewModel,
     downloadedIds: Set<String>,
     activeDownloads: Map<String, ActiveDownload>,
+    isCheckingUpdate: Boolean = false,
     onVideoClick: (VideoItem) -> Unit,
     onDownloadClick: (VideoItem) -> Unit,
     onCheckForUpdate: () -> Unit,
@@ -426,17 +427,28 @@ fun LibraryScreen(
 
                                     OutlinedButton(
                                         onClick = onCheckForUpdate,
+                                        enabled = !isCheckingUpdate,
                                         shape = RoundedCornerShape(10.dp),
                                         modifier = Modifier.weight(1f)
                                     ) {
-                                        Icon(
-                                            imageVector = Icons.Rounded.SystemUpdate,
-                                            contentDescription = null,
-                                            tint = CyanElectric,
-                                            modifier = Modifier.size(16.dp)
-                                        )
-                                        Spacer(modifier = Modifier.width(6.dp))
-                                        Text("Check Update", color = CyanElectric, maxLines = 1)
+                                        if (isCheckingUpdate) {
+                                            CircularProgressIndicator(
+                                                color = CyanElectric,
+                                                modifier = Modifier.size(16.dp),
+                                                strokeWidth = 2.dp
+                                            )
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text("Checking…", color = CyanElectric, maxLines = 1)
+                                        } else {
+                                            Icon(
+                                                imageVector = Icons.Rounded.SystemUpdate,
+                                                contentDescription = null,
+                                                tint = CyanElectric,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text("Check Update", color = CyanElectric, maxLines = 1)
+                                        }
                                     }
                                 }
                             }

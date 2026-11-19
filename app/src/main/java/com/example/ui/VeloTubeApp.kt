@@ -168,6 +168,7 @@ fun VeloTubeApp() {
     val downloadedIds by homeViewModel.downloadedIds.collectAsStateWithLifecycle()
     val statusToast by downloadPromptViewModel.statusToast.collectAsStateWithLifecycle()
     val availableUpdate by downloadPromptViewModel.availableUpdate.collectAsStateWithLifecycle()
+    val isCheckingUpdate by downloadPromptViewModel.isCheckingUpdate.collectAsStateWithLifecycle()
     val prefs by libraryViewModel.preferences.collectAsStateWithLifecycle()
 
     var isPlayerFullscreen by rememberSaveable { mutableStateOf(false) }
@@ -415,6 +416,7 @@ fun VeloTubeApp() {
                                 viewModel = libraryViewModel,
                                 downloadedIds = downloadedIds,
                                 activeDownloads = activeDownloads,
+                                isCheckingUpdate = isCheckingUpdate,
                                 onVideoClick = openWatch,
                                 onDownloadClick = { downloadPromptViewModel.openDownloadSheet(it) },
                                 onCheckForUpdate = { downloadPromptViewModel.checkForAppUpdate(manual = true) }
@@ -538,7 +540,8 @@ private fun MiniDownloadProgressBar(
     totalCount: Int,
     onClick: () -> Unit
 ) {
-    val pct = (progress * 100f).toInt().coerceIn(0, 100)
+    val safeProgress = if (progress.isFinite()) progress.coerceIn(0f, 1f) else 0f
+    val pct = (safeProgress * 100f).toInt().coerceIn(0, 100)
     Surface(
         color = SurfaceLevel2,
         modifier = Modifier
@@ -587,7 +590,7 @@ private fun MiniDownloadProgressBar(
                 )
             }
             LinearProgressIndicator(
-                progress = { progress.coerceIn(0f, 1f) },
+                progress = { safeProgress },
                 color = CrimsonAccent,
                 trackColor = OutlineSubtle,
                 modifier = Modifier
